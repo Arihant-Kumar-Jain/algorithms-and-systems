@@ -1,0 +1,21 @@
+#include <iostream>
+using namespace std;
+
+
+
+int main(){
+	ios::sync_with_stdio(NULL), cin.tie(nullptr), cout.tie(nullptr);
+
+	int t; cin>>t;
+
+	while(t--){
+		long long n; cin>>n;
+
+		if(n & (n-1)){
+			cout << "YES"<<"\n" ;
+		}else{
+			cout << "NO" << "\n";
+		}
+	}
+
+}
