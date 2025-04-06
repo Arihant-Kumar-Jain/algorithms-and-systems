@@ -1,15 +1,1 @@
-move disk-1fromctob
-move disk1fromatoc
-move disk2fromatob
-move disk1fromctob
-move disk3fromatoc
-move disk1frombtoa
-move disk2frombtoc
-move disk1fromatoc
-move disk4fromatob
-move disk1fromctob
-move disk2fromctoa
-move disk1frombtoa
-move disk3fromctob
-move disk1fromatoc
-move disk2fromatob
+Enter infix expression: Postfix Expression: ABCD-*+
