@@ -1,0 +1,127 @@
+#include <iostream>
+#include <vector>
+#include <ctime>
+#include <algorithm>
+#include <cstdlib>
+using namespace std;
+
+struct Node {
+    int key;
+    Node *left, *right;
+    int height;
+
+    Node(int k) : key(k), left(nullptr), right(nullptr), height(1) {}
+};
+
+int height(Node* n) {
+    return n ? n->height : 0;
+}
+
+int getBalance(Node* n) {
+    return n ? height(n->left) - height(n->right) : 0;
+}
+
+int max(int a, int b) {
+    return (a > b) ? a : b;
+}
+
+Node* rightRotate(Node* y) {
+    Node* x = y->left;
+    Node* T2 = x->right;
+    x->right = y;
+    y->left = T2;
+    y->height = max(height(y->left), height(y->right)) + 1;
+    x->height = max(height(x->left), height(x->right)) + 1;
+    return x;
+}
+
+Node* leftRotate(Node* x) {
+    Node* y = x->right;
+    Node* T2 = y->left;
+    y->left = x;
+    x->right = T2;
+    x->height = max(height(x->left), height(x->right)) + 1;
+    y->height = max(height(y->left), height(y->right)) + 1;
+    return y;
+}
+
+Node* insertAVL(Node* root, int key) {
+    if (!root) return new Node(key);
+    if (key < root->key) root->left = insertAVL(root->left, key);
+    else root->right = insertAVL(root->right, key);
+
+    root->height = 1 + max(height(root->left), height(root->right));
+    int balance = getBalance(root);
+
+    if (balance > 1 && key < root->left->key)
+        return rightRotate(root);
+    if (balance < -1 && key > root->right->key)
+        return leftRotate(root);
+    if (balance > 1 && key > root->left->key) {
+        root->left = leftRotate(root->left);
+        return rightRotate(root);
+    }
+    if (balance < -1 && key < root->right->key) {
+        root->right = rightRotate(root->right);
+        return leftRotate(root);
+    }
+
+    return root;
+}
+
+void inOrderTraversal(Node* root, vector<int>& sorted) {
+    if (!root) return;
+    inOrderTraversal(root->left, sorted);
+    sorted.push_back(root->key);
+    inOrderTraversal(root->right, sorted);
+}
+
+void insertionSort(vector<int>& arr) {
+    int n = arr.size();
+    for (int i = 1; i < n; i++) {
+        int key = arr[i], j = i - 1;
+        while (j >= 0 && arr[j] > key) arr[j + 1] = arr[j--];
+        arr[j + 1] = key;
+    }
+}
+
+int main() {
+    srand(time(0));
+    int n0 = -1;
+
+    cout << "n\tInsertionSort\tAVLSort (ms)\n";
+    for (int n = 10; n <= 10000; n += 100) {
+        vector<int> data(n);
+        for (int i = 0; i < n; i++) data[i] = i + 1;
+        random_shuffle(data.begin(), data.end());
+
+        // Insertion Sort
+        vector<int> insertionData = data;
+        clock_t start = clock();
+        insertionSort(insertionData);
+        clock_t end = clock();
+        double insertionTime = 1000.0 * (end - start) / CLOCKS_PER_SEC;
+
+        // AVL Sort
+        Node* root = nullptr;
+        start = clock();
+        for (int val : data)
+            root = insertAVL(root, val);
+        vector<int> avlSorted;
+        inOrderTraversal(root, avlSorted);
+        end = clock();
+        double avlTime = 1000.0 * (end - start) / CLOCKS_PER_SEC;
+
+        cout << n << "\t" << insertionTime << "\t\t" << avlTime << endl;
+
+        if (avlTime < insertionTime && n0 == -1)
+            n0 = n;
+    }
+
+    if (n0 != -1)
+        cout << "\n✅ Smallest n₀ where AVL-based sorting is faster than Insertion Sort: " << n0 << "\n";
+    else
+        cout << "\n❌ AVL never became faster in this test range.\n";
+
+    return 0;
+}
