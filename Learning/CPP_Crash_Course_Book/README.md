@@ -24,6 +24,27 @@ That's the whole interface. The dashboard always shows your level, streak, today
    compiles and claims the XP.
 6. `./quest stop "what clicked today"` stops the timer and writes a summary to `journal.md`
 
+### 🗺️ Or play on the world map
+
+```bash
+./quest world
+```
+
+This opens the quest as a game in your browser. It's served from your own machine (`127.0.0.1` only) and uses
+the same save file as the terminal commands, so you can switch between the two whenever you like.
+
+- **Explore:** drag (or two-finger swipe) to pan with a little slide, and use the mouse wheel, pinch, or ⌘ +
+  scroll to zoom. The minimap in the corner jumps anywhere. Chapters are regions along a road, bosses are
+  shielded lairs, and unexplored chapters sit under fog until you start them.
+- **Zoom into a chapter** to see its quest ring: gold circles are reading quests, teal diamonds are
+  exercises (pips show difficulty).
+- **Click anything** to open its journal panel. From there you can mark reading done, open the exercise in
+  VS Code, run it, compile-check and claim it, tick boss win conditions, or attack a boss.
+- **Look up** for the side quests: each book is a constellation, and its stars light up as you read.
+- **Top bar:** level, XP, streak, today's goal, a focus timer, journal, badges and undo. Level-ups, cleared
+  chapters, bosses and badges get their own animations (and sounds, which you can mute).
+- Press `?` on the map for every shortcut. Keep the terminal running while you play; Ctrl-C closes it.
+
 Optional: make `quest` work from anywhere by adding this to `~/.zshrc`:
 
 ```bash
@@ -48,7 +69,7 @@ CPP_Crash_Course_Book/
 ├── projects/              ← 🐉 8 boss fights: bigger projects that combine several chapters
 │   └── bossN_<name>/      ← README.md (spec + win-condition checkboxes) + empty main.cpp
 ├── side_quests/           ← 🗺️ 4 optional books, each with its PDF, an empty notes.md, and lab/ where needed
-└── .quest/                ← game data: book.json (levels), save.json (your progress)
+└── .quest/                ← game data: book.json (levels), save.json (your progress), world.html (the map)
 ```
 
 Every `.cpp` and `notes.md` starts completely empty. The tasks live in the game, not in the files:
@@ -150,6 +171,7 @@ for this folder, adding contracts to your boss code, signing your git commits wi
 
 ```
 ./quest                       dashboard + next steps
+./quest world [--port N]      the clickable world map in your browser
 ./quest start / stop ["note"] focus timer (stop -m 45 fixes a forgotten timer)
 ./quest read [2.3|2|2.all]    mark reading done (no argument = the next one)
 ./quest run <id|bossN|file.cpp> [--asan|--tsan] [-- args]

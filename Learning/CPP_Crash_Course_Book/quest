@@ -1005,6 +1005,11 @@ def side_line(book, k):
 
 
 def parse_read_targets(book, save, k, args):
+    k = SimpleNamespace(read=dict(k.read))   # local copy: "read 2 2" picks two different quests
+
+    def take(i):
+        k.read[i] = "picked"
+        return i
     if not args:
         nr = next_read(book, save, k)
         if not nr:
@@ -1024,7 +1029,7 @@ def parse_read_targets(book, save, k, args):
             if not got:
                 print(DIM(f"  Chapter {a}: all reading done."))
                 continue
-            ids.append(got[1]["id"])
+            ids.append(take(got[1]["id"]))
         elif sm and sm.group(1) in book.side:
             key, chn, every = sm.group(1), sm.group(2), sm.group(3)
             s = book.side[key]
@@ -1037,7 +1042,7 @@ def parse_read_targets(book, save, k, args):
                 if not q:
                     print(DIM(f"  {s['short']}: nothing left to read there."))
                     continue
-                ids.append(q["id"])
+                ids.append(take(q["id"]))
         else:
             die(f"Unknown reading quest '{a}'. Examples: 2.3 · 2 (next in ch 2) · 2.all · dbg (next in a side book) · dbg.2.3")
     return ids
@@ -1656,6 +1661,255 @@ def cmd_pdf(book, args):
             print(f"  Next quest {q['id']} starts on page {q['page']} (⌥⌘G in Preview).")
 
 
+
+# ───────────────────────────── world: the clickable map in your browser ─────────────────────────────
+WORLD_HTML = QDIR / "world.html"
+WORLD_PORT = 4747
+
+
+def boss_goals(b):
+    readme = book_boss_readme(b)
+    if not readme.exists():
+        return []
+    out, in_win = [], False
+    for ln in readme.read_text(encoding="utf-8").splitlines():
+        if ln.startswith("## "):
+            in_win = ln[3:].strip().lower().startswith("win conditions")
+            continue
+        m = re.match(r"^\s*[-*]\s*\[([ xX])\]\s*(.*)$", ln)
+        if in_win and m:
+            out.append({"text": m.group(2), "done": m.group(1).lower() == "x"})
+    return out
+
+
+def boss_tick(b, index, on):
+    readme = book_boss_readme(b)
+    lines = readme.read_text(encoding="utf-8").splitlines(keepends=True)
+    in_win, i = False, -1
+    for j, ln in enumerate(lines):
+        if ln.startswith("## "):
+            in_win = ln[3:].strip().lower().startswith("win conditions")
+            continue
+        m = re.match(r"^(\s*[-*]\s*\[)([ xX])(\].*)$", ln, re.S)
+        if in_win and m:
+            i += 1
+            if i == index:
+                lines[j] = m.group(1) + ("x" if on else " ") + m.group(3)
+                readme.write_text("".join(lines), encoding="utf-8")
+                return True
+    return False
+
+
+def world_state(book):
+    save = load_save()
+    k = compute(book, save)
+
+    def rq(q):
+        return {"id": q["id"], "title": q["title"], "pages": pages_of(q), "page": q["page"], "xp": q["xp"],
+                "optional": bool(q.get("optional")), "done": k.read.get(q["id"])}
+
+    def ex(c, e):
+        d = k.exd.get(e["id"])
+        return {"id": e["id"], "kind": e["kind"], "stars": e["stars"], "title": e["title"], "task": e["task"],
+                "path": rel(book.ex_path(c, e)) if e.get("file") else None, "optional": e["optional"],
+                "bonus": e["bonus"], "boost": e["boost"], "xp": Book.ex_xp(e),
+                "done": d["at"] if d else None, "clean": bool(d and d.get("clean"))}
+
+    chapters = []
+    for c in book.chapters:
+        v = k.chap[c["num"]]
+        chapters.append({
+            "num": c["num"], "title": c["title"], "part": c["part"], "pages": f"p.{c['start']}–{c['end']}",
+            "ex_page": c.get("ex_page"), "optional": c["optional"], "dir": c["dir"],
+            "notes": f"{c['dir']}/notes.md", "notes_lines": notes_lines(book, c), "scribe": c["num"] in k.scribe,
+            "cleared": v.cleared_at if v.cleared else None, "started": v.started,
+            "reading": [rq(q) for q in c["reading"]], "exercises": [ex(c, e) for e in c["exercises"]]})
+    bosses = []
+    for b in book.bosses.values():
+        bosses.append({"n": b["n"], "name": b["name"], "pitch": b["pitch"], "xp": b["xp"], "unlock": b["unlock"],
+                       "unlocked": boss_unlocked(k, b), "defeated": k.boss.get(b["n"]), "goals": boss_goals(b),
+                       "readme": rel(book_boss_readme(b)), "main": rel(book.boss_dir(b) / "main.cpp"), "build": b["build"]})
+    side = []
+    for s in book.side.values():
+        v = k.side[s["key"]]
+        side.append({"key": s["key"], "short": s["short"], "title": s["title"], "author": s["author"], "xp": s["xp"],
+                     "pairs": s["pairs"], "pairs_text": s["pairs_text"], "note": s["note"], "notes": f"{s['dir']}/notes.md",
+                     "notes_lines": notes_lines(book, s), "scribe": s["key"] in k.scribe,
+                     "finished": v.finished_at if v.finished else None, "started": v.started,
+                     "reading_done": v.reading, "labs_done": v.labs,
+                     "chapters": [{"num": sc["num"], "title": sc["title"], "optional": bool(sc.get("optional")),
+                                   "reading": [rq(q) for q in sc["reading"]]} for sc in s["chapters"]],
+                     "labs": [ex(s, x) for x in s["labs"]]})
+    nr = next_read(book, save, k)
+    nxt = {"read": dict(rq(nr[1]), ch=nr[0]["num"]) if nr else None, "ex": None}
+    if k.current is not None:
+        c = book.ch[k.current]
+        todo = [e for e in Book.required_ex(c) if e["id"] not in k.exd]
+        if todo:
+            nxt["ex"] = dict(ex(c, todo[0]), ch=c["num"])
+    recent = [{"at": at, "xp": xp, "label": label} for at, xp, kind, label in k.ledger if kind not in ("streak", "goal")][-14:]
+    return {
+        "now": iso(now()), "title": book.title,
+        "player": {"xp": k.xp, "level": k.level, "title": title_for(k.level), "next_title": title_for(k.level + 1),
+                   "lo": k.lo, "hi": k.hi, "streak": k.streak, "best": k.best, "freezes": k.freezes,
+                   "at_risk": k.at_risk, "today_xp": k.today_xp, "goal": k.goal, "minutes": k.minutes,
+                   "book_frac": k.frac, "done_req": k.done_req, "total_req": k.total_req, "last14": k.last14},
+        "session": save["session"], "current": k.current, "chapters": chapters, "bosses": bosses, "side": side,
+        "badges": [{"id": bid, "emoji": emo, "name": name, "desc": desc, "earned": bid in k.badges,
+                    "date": save["badge_dates"].get(bid)} for bid, emo, name, desc, _ in BADGES],
+        "next": nxt, "recent": list(reversed(recent)), "cards": len(load_cards(book)),
+    }
+
+
+_ID_READ = re.compile(r"^(\d+\.\d+|\d+|\d+\.all|[a-z]+(\.\d+)?(\.(\d+|all))?)$")
+_ID_EX = re.compile(r"^(\d+|[a-z]+)-\d+$")
+
+
+def _safe_text(args):
+    return all(len(a) <= 600 and not a.startswith("-") for a in args)
+
+
+def world_cmd_ok(args):
+    if not isinstance(args, list) or not args or not all(isinstance(a, str) for a in args):
+        return False
+    c, rest = args[0], args[1:]
+    if c == "read":
+        return bool(rest) and all(_ID_READ.match(a) for a in rest)
+    if c == "done":
+        return len(rest) >= 1 and bool(_ID_EX.match(rest[0])) and _safe_text(rest[1:])
+    if c == "run":
+        return len(rest) == 1 and (bool(_ID_EX.match(rest[0])) or bool(re.fullmatch(r"boss\d", rest[0])))
+    if c == "undo":
+        return len(rest) <= 1 and all(re.fullmatch(r"[\w.\-]+", a) for a in rest)
+    if c == "start":
+        return not rest
+    if c in ("stop", "log"):
+        return _safe_text(rest) and (c == "stop" or bool(rest))
+    if c == "boss":
+        return len(rest) == 1 and rest[0].isdigit()
+    return False
+
+
+def open_in_editor(path):
+    custom = os.environ.get("QUEST_EDITOR")
+    if custom:
+        cmd = shlex.split(custom) + [str(path)]
+    elif shutil.which("code"):
+        cmd = ["code", str(path)]
+    elif shutil.which("subl"):
+        cmd = ["subl", str(path)]
+    elif sys.platform == "darwin":
+        cmd = ["open", "-t", str(path)]
+    else:
+        cmd = ["xdg-open", str(path)]
+    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def cmd_world(book, args):
+    import http.server
+    import secrets
+    import threading
+    import webbrowser
+    port, auto_open = WORLD_PORT, "--no-open" not in args
+    if "--port" in args:
+        try:
+            port = int(args[args.index("--port") + 1])
+        except (IndexError, ValueError):
+            die("Usage: ./quest world [--port N] [--no-open]")
+    if not WORLD_HTML.exists():
+        die(f"Missing {rel(WORLD_HTML)}.")
+    token = secrets.token_hex(16)
+    lock = threading.Lock()
+    me = str(Path(__file__).resolve())
+    origins = {f"http://127.0.0.1:{port}", f"http://localhost:{port}"}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def send(self, code, body, ctype="application/json"):
+            data = body if isinstance(body, bytes) else json.dumps(body, ensure_ascii=False).encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):
+            path = self.path.split("?")[0]
+            if path in ("/", "/index.html"):
+                html = WORLD_HTML.read_text(encoding="utf-8").replace("__QUEST_TOKEN__", token)
+                return self.send(200, html.encode("utf-8"), "text/html; charset=utf-8")
+            if path == "/api/state":
+                with lock:
+                    return self.send(200, world_state(book))
+            return self.send(404, {"error": "not found"})
+
+        def do_POST(self):
+            if self.headers.get("X-Quest-Token") != token:
+                return self.send(403, {"error": "bad token: reload the page"})
+            origin = self.headers.get("Origin")
+            if origin and origin not in origins:
+                return self.send(403, {"error": "bad origin"})
+            try:
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+            except ValueError:
+                return self.send(400, {"error": "bad json"})
+            path = self.path.split("?")[0]
+            if path == "/api/cmd":
+                a = body.get("args")
+                if not world_cmd_ok(a):
+                    return self.send(400, {"error": "command not allowed"})
+                timeout = 300 if a[0] == "boss" else 120
+                env = dict(os.environ, NO_COLOR="1", PYTHONDONTWRITEBYTECODE="1")
+                with lock:
+                    try:
+                        r = subprocess.run([sys.executable, me] + a, cwd=ROOT, env=env, stdin=subprocess.DEVNULL,
+                                           capture_output=True, text=True, timeout=timeout)
+                        out, code = (r.stdout + r.stderr), r.returncode
+                    except subprocess.TimeoutExpired as e:
+                        out, code = ((e.stdout or "") if isinstance(e.stdout, str) else "") + "\n(timed out)", 124
+                return self.send(200, {"code": code, "output": out})
+            if path == "/api/open":
+                p = (ROOT / str(body.get("path", ""))).resolve()
+                if ROOT not in p.parents or not p.exists():
+                    return self.send(400, {"error": "path not in this folder"})
+                open_in_editor(p)
+                return self.send(200, {"ok": True})
+            if path == "/api/pdf":
+                key = body.get("key")
+                p = book.side_pdf(book.side[key]) if key in book.side else book.pdf()
+                if not p:
+                    return self.send(404, {"error": "PDF not found"})
+                subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(p)])
+                return self.send(200, {"ok": True})
+            if path == "/api/tick":
+                b = book.bosses.get(body.get("n"))
+                if not b or not isinstance(body.get("i"), int):
+                    return self.send(400, {"error": "bad boss"})
+                with lock:
+                    ok = boss_tick(b, body["i"], bool(body.get("on")))
+                return self.send(200, {"ok": ok})
+            return self.send(404, {"error": "not found"})
+
+    try:
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    except OSError:
+        die(f"Port {port} is busy. Is the world already open? Try ./quest world --port {port + 1}")
+    url = f"http://127.0.0.1:{port}/"
+    print(f"\n  🗺️  {B('The world is open')} at {CYN(url)}")
+    print(DIM("  Drag or two-finger swipe to pan · scroll/pinch to zoom · click anything."))
+    print(DIM("  Keep this terminal open while you play; Ctrl-C closes the world.\n"))
+    if auto_open:
+        webbrowser.open(url)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print("\n  👋 World closed. Your progress is saved.")
+    finally:
+        srv.server_close()
+
 HELP = f"""
   {B('quest')}: your C++ Crash Course progress, as a game
 
@@ -1669,6 +1923,7 @@ HELP = f"""
     ./quest review [n] [ch3]     flashcards from your notes.md files
 
   {B('Look around')}
+    ./quest world                the clickable world map in your browser (pan, zoom, click to act)
     ./quest map                  every chapter + boss
     ./quest ch [n]               one chapter: reading quests, exercises, files
     ./quest boss [n]             list bosses / fight one
@@ -1703,7 +1958,7 @@ COMMANDS = {
     "boss": cmd_boss, "start": cmd_start, "stop": cmd_stop, "log": cmd_log,
     "review": cmd_review, "ch": cmd_ch, "chapter": cmd_ch, "map": cmd_map,
     "badges": cmd_badges, "stats": cmd_stats, "undo": cmd_undo, "goal": cmd_goal,
-    "init": cmd_init, "pdf": cmd_pdf, "side": cmd_side, "help": cmd_help, "-h": cmd_help, "--help": cmd_help,
+    "init": cmd_init, "pdf": cmd_pdf, "side": cmd_side, "world": cmd_world, "w": cmd_world, "help": cmd_help, "-h": cmd_help, "--help": cmd_help,
 }
 
 
