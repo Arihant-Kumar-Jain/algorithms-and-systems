@@ -1854,6 +1854,35 @@ def local_hostname():
     return None
 
 
+def local_addresses():
+    """Every IPv4 address another device could use to reach this machine, as (label, ip)."""
+    out = []
+    try:
+        r = subprocess.run(["ifconfig"], capture_output=True, text=True, timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        return out
+    iface = None
+    for ln in r.stdout.splitlines():
+        m = re.match(r"^([a-z][a-z0-9]*):", ln)
+        if m:
+            iface = m.group(1)
+            continue
+        m = re.match(r"\s+inet (\d+\.\d+\.\d+\.\d+)", ln)
+        if not (m and iface) or m.group(1).startswith(("127.", "169.254.")):
+            continue
+        ip = m.group(1)
+        if ip.startswith("172.20.10."):
+            label = "Personal Hotspot (cable or Wi-Fi)"
+        elif iface == "en0":
+            label = "Wi-Fi"
+        elif iface.startswith(("bridge", "utun", "awdl", "llw", "anpi")):
+            continue
+        else:
+            label = f"network {iface}"
+        out.append((label, ip))
+    return out
+
+
 def lan_ip():
     import socket
     try:
@@ -1983,9 +2012,15 @@ def cmd_world(book, args):
             if path == "/api/pair":
                 if not self.is_local():
                     return self.send(403, {"error": "pairing is shown on the Mac only"})
-                return self.send(200, {"lan": lan, "connected": reader_connected(),
-                                       "url": f"http://{ip}:{port}/read?key={pair}" if lan else None,
-                                       "alt": f"http://{host_alt}:{port}/read?key={pair}" if lan and host_alt else None})
+                addrs = []
+                if lan:
+                    found = local_addresses() or [("Wi-Fi", ip)]
+                    found.sort(key=lambda a: (a[1] != lan_ip(), a[0]))
+                    addrs = [{"label": f"{lbl} · {a}", "url": f"http://{a}:{port}/read?key={pair}"} for lbl, a in found]
+                    if host_alt:
+                        addrs.append({"label": f"Bonjour name · {host_alt}", "url": f"http://{host_alt}:{port}/read?key={pair}"})
+                return self.send(200, {"lan": lan, "connected": reader_connected(), "addresses": addrs,
+                                       "url": addrs[0]["url"] if addrs else None})
             return self.send(404, {"error": "not found"})
 
         def do_POST(self):

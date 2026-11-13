@@ -1122,16 +1122,30 @@ async function ipadModal(){
       <div class="acts"><button class="btn ghost" data-act="modalClose">Got it</button></div>`);
     return;
   }
-  openModal(`<h2>📲 Read on your iPad</h2><p class="muted">Point the iPad's camera at this code (both devices on the same Wi-Fi). It opens the reader; after that, <b>Open the book</b> here turns the iPad to that page.</p>
-    <div id="qr" style="background:#fff;padding:14px;border-radius:14px;width:max-content;margin:16px auto;min-width:150px;min-height:150px;display:grid;place-items:center;color:#333;font-size:12px">loading…</div>
-    <code class="path">${esc(p.url)}</code>${p.alt ? `<div class="small muted" style="margin-top:8px">If the Mac's IP address changes, this one keeps working: <code>${esc(p.alt)}</code></div>` : ""}
+  const addrs = p.addresses && p.addresses.length ? p.addresses : [{label:"Wi-Fi", url:p.url}];
+  openModal(`<h2>📲 Read on your iPad</h2><p class="muted">Point the iPad's camera at this code. Both devices must share a network. It opens the reader; after that, <b>Open the book</b> here turns the iPad to that page.</p>
+    <div class="chips" id="addr-pick" style="justify-content:center;margin-top:12px">${addrs.map((a, i) => `<button class="btn ${i ? "ghost" : ""} sm" data-addr="${i}">${esc(a.label)}</button>`).join("")}</div>
+    <div id="qr" style="background:#fff;padding:14px;border-radius:14px;width:max-content;margin:14px auto;min-width:150px;min-height:150px;display:grid;place-items:center;color:#333;font-size:12px">loading…</div>
+    <code class="path" id="qr-url">${esc(addrs[0].url)}</code>
     <div class="hint" id="pair-st">${p.connected ? "✅ iPad connected." : "⏳ Waiting for your iPad…"}</div>
+    <details class="hint"><summary style="cursor:pointer">iPad can't open it?</summary><div style="margin-top:8px;line-height:1.55">
+      • Campus and office Wi-Fi often blocks devices from talking to each other. Turn on your iPhone's <b>Personal Hotspot</b> and join it from both the Mac and the iPad, then reopen 📲 and pick the hotspot address.<br>
+      • A USB-C cable alone doesn't connect Safari to the Mac. A cellular iPad can share its <b>Personal Hotspot</b> over the cable; when you do, a hotspot address shows up above.<br>
+      • Try the <b>Bonjour name</b> option if the IP address changes.</div></details>
     <div class="hint">Tip: on the iPad, tap Share → <b>Add to Home Screen</b> for a full-screen Quest Reader app.</div>
     <div class="acts"><button class="btn ghost" data-act="modalClose">Done</button></div>`);
+  let qrReady = false;
+  const draw = i => {
+    $("#qr-url").textContent = addrs[i].url;
+    document.querySelectorAll("#addr-pick [data-addr]").forEach(b => b.classList.toggle("ghost", +b.dataset.addr !== i));
+    if (!qrReady) return;
+    const qr = qrcode(0, "M"); qr.addData(addrs[i].url); qr.make();
+    $("#qr").innerHTML = qr.createSvgTag(5, 0);
+  };
+  $("#addr-pick").addEventListener("click", e => { const b = e.target.closest("[data-addr]"); if (b) draw(+b.dataset.addr); });
   try {
     await loadScript("https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js");
-    const qr = qrcode(0, "M"); qr.addData(p.url); qr.make();
-    $("#qr").innerHTML = qr.createSvgTag(5, 0);
+    qrReady = true; draw(0);
   } catch (e){ $("#qr").textContent = "The QR code needs internet. Type the address below into Safari instead."; }
   clearInterval(pairTimer);
   pairTimer = setInterval(async () => {
