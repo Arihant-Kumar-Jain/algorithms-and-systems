@@ -32,6 +32,19 @@ A deep dive into system operations, memory management, and multithreading in mod
 - **OpenCV Projects**: Experiments and implementations combining C++ with OpenCV for computer vision tasks, image processing, and performance-critical visual operations.
 - **Academic Labs**: Core university-level C++ labs spanning various computational and systems concepts.
 
+## 🎮 C++ Crash Course Quest (`Learning/CPP_Crash_Course_Book/`)
+
+<img src="Learning/CPP_Crash_Course_Book/docs/world.jpg" alt="The quest's world map: chapters along a winding road, boss lairs, fog of war and side-quest constellations" width="100%"/>
+
+My study system for working through *C++ Crash Course* (Josh Lospinoso): the book turned into a game.
+- **`./quest` CLI** (Python, standard library only): XP, levels, streaks with freezes, badges, focus timer, flashcards and a study journal, with compile-checked exercises (`-Wall -Wextra`, bonus XP for zero warnings).
+- **8 boss projects** spanning several chapters each (a RAII container, an RPN calculator, a thread pool, a Boost.Asio chat server), built with AddressSanitizer, UBSan or ThreadSanitizer.
+- **World map** (`./quest world`): a pan-and-zoom browser map of the whole book with fog of war, boss lairs and side-quest constellations. Every click runs the same CLI.
+- **iPad reader** (`./quest world --ipad`): pair by QR code, then *Open the book* on the Mac turns the iPad to the exact page.
+- **Linux toolbox**: a dev container with GCC, GDB, Valgrind, strace, Make, CMake and Boost.
+
+➡️ **[Full guide and screenshots](Learning/CPP_Crash_Course_Book/README.md)**
+
 ## 💻 IDE Configurations & Projects (`VScode C++`, `Xcode files`, `MyProject`)
 Various localized C++ configurations and isolated sandbox environments tailored for different IDEs (VS Code, Xcode) to handle cross-platform C++ development and debugging efficiently.
 

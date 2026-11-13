@@ -767,6 +767,27 @@ function homeView(){
   flyToKey("ch:" + cur, .62);
 }
 function worldView(){ const k = kMin(); flyTo(W / 2, H / 2, k, 800); }
+function jumpTo(wx, wy, k){
+  stopMotion();
+  const v = S.view, [sx, sy] = viewCenter();
+  v.k = clamp(k, kMin(), K_MAX); v.x = sx - wx * v.k; v.y = sy - wy * v.k; clampView(); applyView();
+}
+/* deep links: #ch:5, #boss:1, #side:prag, #rd:2.3, #world, #sky (add @zoom, e.g. #ch:5@1.4) */
+function applyHash(animate){
+  const h = decodeURIComponent(location.hash.slice(1));
+  if (!h) return false;
+  const [key, z] = h.split("@");
+  const go = (x, y, k) => animate ? flyTo(x, y, k) : jumpTo(x, y, k);
+  if (key === "world"){ closePanel(); go(W / 2, H / 2, kMin()); return true; }
+  if (key === "sky"){ closePanel(); go(W / 2, SKY / 2, Math.max(kMin(), innerWidth / W * 1.05)); return true; }
+  const p = S.nodes[key];
+  if (!p) return false;
+  select(key);
+  const t = key.split(":")[0];
+  go(p[0], p[1], +z || (t === "ch" ? .95 : t === "side" ? .62 : t === "boss" ? .8 : 1.15));
+  return true;
+}
+addEventListener("hashchange", () => applyHash(true));
 
 /* pointer input: drag with inertia, pinch, wheel, click */
 const pointers = new Map();
@@ -1288,6 +1309,7 @@ pairPoll(); setInterval(() => { if (!document.hidden) pairPoll(); }, 5000);
   if (!S.st){ $("#loading .s").textContent = "Can't reach the world server. Run ./quest world in your terminal."; return; }
   S.view.k = kMin(); clampView(); applyView();
   $("#loading").style.opacity = 0; setTimeout(() => $("#loading").remove(), 650);
+  if (applyHash(false)) return;
   setTimeout(homeView, 450);
   if (!store.seenHelp){ store.seenHelp = true; saveStore(); setTimeout(() => toast("🗺️ <b>Welcome to your world.</b> Drag to pan, scroll or pinch to zoom, click anything. Press <kbd>?</kbd> for controls."), 1600); }
 })();
