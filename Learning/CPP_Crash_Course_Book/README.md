@@ -45,6 +45,27 @@ the same save file as the terminal commands, so you can switch between the two w
   chapters, bosses and badges get their own animations (and sounds, which you can mute).
 - Press `?` on the map for every shortcut. Keep the terminal running while you play; Ctrl-C closes it.
 
+### 📲 Read the book on your iPad
+
+```bash
+./quest world --ipad
+```
+
+1. Put the Mac and iPad on the same Wi-Fi. If macOS asks whether Python may accept incoming connections, click
+   **Allow**.
+2. On the Mac's map, click **📲** and scan the QR code with the iPad's camera. The **Quest Reader** opens.
+   Tip: Share → **Add to Home Screen** makes it a full-screen app.
+3. From then on, **Open the book** on any quest in the Mac's map turns the iPad to that exact page. That works for
+   all five books, and side books with their own page numbering land on the right page too.
+
+On the iPad, swipe or tap the edges to turn pages, tap the middle to show or hide the bars, and drag the slider
+or tap the page number to jump. The top bar shows which reading quest you're in, with a **Mark read** button
+(the XP lands on the Mac). It remembers your place in each book.
+
+Only devices that scanned the code can connect. The code is kept in `.quest/pair.key` (never committed), so you
+pair once; delete that file to revoke access. The connection isn't encrypted, so use it on your own Wi-Fi.
+The reader needs internet the first time, to load Mozilla's PDF.js viewer.
+
 Optional: make `quest` work from anywhere by adding this to `~/.zshrc`:
 
 ```bash
@@ -171,7 +192,7 @@ for this folder, adding contracts to your boss code, signing your git commits wi
 
 ```
 ./quest                       dashboard + next steps
-./quest world [--port N]      the clickable world map in your browser
+./quest world [--ipad]        the clickable world map in your browser (--ipad: read on your iPad)
 ./quest start / stop ["note"] focus timer (stop -m 45 fixes a forgotten timer)
 ./quest read [2.3|2|2.all]    mark reading done (no argument = the next one)
 ./quest run <id|bossN|file.cpp> [--asan|--tsan] [-- args]

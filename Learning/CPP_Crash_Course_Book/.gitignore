@@ -3,3 +3,4 @@
 *.dSYM/
 .quest/*.tmp
 .DS_Store
+.quest/pair.key

@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Quest Reader">
+<meta name="theme-color" content="#0a0d16">
+<title>Quest Reader</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@700;900&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0a0d16; --bar:rgba(10,14,24,.94); --line:rgba(230,192,104,.22); --line-2:rgba(255,255,255,.1);
+  --text:#efe6d2; --muted:#a3abbd; --gold:#e6c068; --gold-2:#f6dc93; --teal:#5fd4c0; --red:#ef6a5f;
+  --display:"Cinzel", Georgia, serif; --ui:"Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+  color-scheme:dark;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font-family:var(--ui);overflow:hidden;-webkit-user-select:none;user-select:none;overscroll-behavior:none}
+button,select{font:inherit;color:inherit}
+#stage{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;touch-action:pinch-zoom}
+#stage canvas{background:#fff;border-radius:3px;box-shadow:0 12px 50px rgba(0,0,0,.65);display:block}
+#stage canvas.in-next{animation:inR .22s ease-out}
+#stage canvas.in-prev{animation:inL .22s ease-out}
+@keyframes inR{from{opacity:.4;transform:translateX(26px)}}
+@keyframes inL{from{opacity:.4;transform:translateX(-26px)}}
+.bar{position:fixed;left:0;right:0;z-index:5;background:var(--bar);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);transition:transform .25s cubic-bezier(.2,.8,.2,1);display:flex;align-items:center;gap:10px}
+#top{top:0;padding:calc(env(safe-area-inset-top) + 10px) 14px 10px;border-bottom:1px solid var(--line-2);flex-wrap:wrap}
+#bot{bottom:0;padding:10px 14px calc(env(safe-area-inset-bottom) + 12px);border-top:1px solid var(--line-2)}
+body.hide #top{transform:translateY(-110%)}
+body.hide #bot{transform:translateY(110%)}
+select{background:rgba(255,255,255,.06);border:1px solid var(--line-2);border-radius:10px;padding:8px 10px;font-weight:600;font-size:14px;max-width:240px}
+.btn{border:1px solid rgba(230,192,104,.55);background:linear-gradient(180deg,#3a2f14,#251e0d);color:var(--gold-2);font-weight:600;font-size:14px;border-radius:10px;padding:8px 12px;white-space:nowrap;cursor:pointer}
+.btn.ghost{background:rgba(255,255,255,.05);border-color:var(--line-2);color:var(--text)}
+.btn:disabled{opacity:.5}
+.sp{flex:1}
+#quest{display:flex;align-items:center;gap:8px;min-width:0;flex:1 1 320px;font-size:14px}
+#quest .qk{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--gold);flex:none}
+#quest .qt{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+#quest .qp{color:var(--muted);font-size:12px;flex:none}
+#quest .ok{color:var(--teal);font-weight:600;font-size:13px;flex:none}
+#link{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--muted);flex:none}
+#link i{width:8px;height:8px;border-radius:50%;background:#6c7588}
+#link.on i{background:var(--teal);box-shadow:0 0 8px var(--teal)}
+#slider{flex:1;accent-color:var(--gold);height:28px}
+#pg{min-width:120px;font-variant-numeric:tabular-nums}
+#toast{position:fixed;left:50%;top:calc(env(safe-area-inset-top) + 76px);transform:translateX(-50%);z-index:9;background:rgba(18,24,40,.97);border:1px solid var(--line);border-radius:12px;padding:10px 16px;font-size:14.5px;box-shadow:0 10px 30px rgba(0,0,0,.5);opacity:0;transition:opacity .25s;pointer-events:none;max-width:90vw;text-align:center}
+#toast.show{opacity:1}
+#loading{position:fixed;inset:0;z-index:8;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;background:radial-gradient(circle at 50% 40%,#13203a,#060912)}
+#loading .t{font-family:var(--display);font-weight:900;letter-spacing:.18em;font-size:22px}
+#loading .s{color:var(--muted);font-size:14px}
+#loading.gone{display:none}
+.edge{position:fixed;top:50%;z-index:4;transform:translateY(-50%);width:44px;height:88px;display:grid;place-items:center;color:rgba(255,255,255,.35);font-size:34px;pointer-events:none;transition:opacity .25s}
+.edge.l{left:4px}.edge.r{right:4px}
+body.hide .edge{opacity:0}
+@media (max-width:700px){ select{max-width:150px} #quest{flex-basis:100%;order:3} #pg{min-width:90px} }
+</style>
+</head>
+<body>
+<div id="stage" aria-label="Book page"></div>
+<div class="edge l" aria-hidden="true">‹</div><div class="edge r" aria-hidden="true">›</div>
+<div id="top" class="bar">
+  <select id="book" aria-label="Book"></select>
+  <div id="quest"></div>
+  <span id="link" title="When lit, clicking “Open the book” on your Mac's map turns this page"><i></i>Mac</span>
+  <a class="btn ghost" href="/" title="World map">🗺️</a>
+</div>
+<div id="bot" class="bar">
+  <button class="btn ghost" id="prev" aria-label="Previous page">‹</button>
+  <input id="slider" type="range" min="1" max="1" value="1" aria-label="Page">
+  <button class="btn ghost" id="next" aria-label="Next page">›</button>
+  <button class="btn ghost" id="pg" title="Go to page">…</button>
+</div>
+<div id="toast" role="status"></div>
+<div id="loading"><div class="t">QUEST READER</div><div class="s" id="load-s">opening the book…</div></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+"use strict";
+const TOKEN = "__QUEST_TOKEN__";
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const R = {doc:null, key:null, page:1, n:1, labels:null, st:null, seq:-1, cache:new Map(), dir:"", focus:null, ticket:0};
+let store = {};
+try { store = JSON.parse(localStorage.getItem("quest-reader") || "{}"); } catch (e) { store = {}; }
+const save = () => { try { localStorage.setItem("quest-reader", JSON.stringify(store)); } catch (e) {} };
+
+async function api(path, body){
+  const opt = body ? {method:"POST", headers:{"Content-Type":"application/json", "X-Quest-Token":TOKEN}, body:JSON.stringify(body)} : {};
+  const r = await fetch(path, opt);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
+  return j;
+}
+let toastTimer;
+function toast(html){ const t = $("#toast"); t.innerHTML = html; t.classList.add("show"); clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("show"), 3200); }
+function loading(msg){ const l = $("#loading"); if (msg === false){ l.classList.add("gone"); return; } l.classList.remove("gone"); $("#load-s").textContent = msg; }
+
+/* quests on the current page */
+async function loadState(){ try { R.st = await api("/api/state"); } catch (e) {} }
+function questsFor(key){
+  if (!R.st) return [];
+  if (key === "main") return R.st.chapters.flatMap(c => c.reading);
+  const s = R.st.side.find(s => s.key === key);
+  return s ? s.chapters.flatMap(c => c.reading) : [];
+}
+function questAt(key, page){
+  const qs = questsFor(key).filter(q => q.pdf <= page && page <= q.pdf_end);
+  return qs.find(q => q.id === R.focus) || qs.find(q => !q.done) || qs[0] || null;
+}
+function updateQuest(){
+  const q = questAt(R.key, R.page), el = $("#quest");
+  if (!q){ el.innerHTML = `<span class="qp">No reading quest on this page</span>`; return; }
+  el.innerHTML = `<span class="qk">${esc(q.id)}</span><span class="qt">${esc(q.title)}</span><span class="qp">${esc(q.pages)}</span>` +
+    (q.done ? `<span class="ok">✓ read</span>` : `<button class="btn" id="markread" data-id="${esc(q.id)}">✓ Mark read +${q.xp}</button>`);
+}
+
+/* PDF */
+function label(p){ const l = R.labels && R.labels[p - 1]; return l && l !== String(p) ? l : String(p); }
+async function openBook(key, page){
+  const ticket = ++R.ticket;                       // a newer request wins over one still loading
+  if (key !== R.key || !R.doc){
+    loading("opening the book…");
+    const task = pdfjsLib.getDocument({url:`/pdf/${encodeURIComponent(key)}.pdf`});
+    task.onProgress = ({loaded, total}) => { if (total && ticket === R.ticket) loading(`downloading ${Math.round(loaded / total * 100)}%`); };
+    let doc;
+    try { doc = await task.promise; }
+    catch (e){ if (ticket === R.ticket) loading("Couldn't open this book: " + e.message); return; }
+    if (ticket !== R.ticket){ doc.destroy(); return; }
+    if (R.doc){ try { R.doc.destroy(); } catch (e) {} }
+    R.cache.clear(); R.doc = doc; R.key = key; R.n = doc.numPages;
+    try { R.labels = await doc.getPageLabels(); } catch (e){ R.labels = null; }
+    $("#slider").max = R.n; $("#book").value = key;
+    loading(false);
+  }
+  if (ticket !== R.ticket) return;
+  await go(page || store["p:" + key] || 1);
+}
+async function go(p, dir = ""){
+  if (!R.doc) return;
+  p = Math.max(1, Math.min(R.n, Math.round(p)));
+  R.dir = dir; R.page = p;
+  store["p:" + R.key] = p; store.book = R.key; save();
+  $("#slider").value = p;
+  $("#pg").textContent = `p.${label(p)} · ${p}/${R.n}`;
+  updateQuest();
+  await render();
+  prefetch(p + 1); prefetch(p - 1); prefetch(p + 2);
+}
+function fit(v){ const m = 6; return Math.min((innerWidth - m * 2) / v.width, (innerHeight - m * 2) / v.height); }
+function pageCanvas(p){
+  const id = `${R.key}:${p}:${innerWidth}x${innerHeight}`;
+  if (R.cache.has(id)) return R.cache.get(id);
+  const doc = R.doc;
+  const job = (async () => {
+    const page = await doc.getPage(p);
+    const base = page.getViewport({scale:1}), dpr = Math.min(window.devicePixelRatio || 1, 3), s = fit(base);
+    const vp = page.getViewport({scale:s * dpr});
+    const c = document.createElement("canvas");
+    c.width = Math.floor(vp.width); c.height = Math.floor(vp.height);
+    c.style.width = Math.floor(vp.width / dpr) + "px"; c.style.height = Math.floor(vp.height / dpr) + "px";
+    await page.render({canvasContext:c.getContext("2d"), viewport:vp}).promise;
+    return c;
+  })();
+  R.cache.set(id, job);
+  while (R.cache.size > 7) R.cache.delete(R.cache.keys().next().value);
+  job.catch(() => R.cache.delete(id));
+  return job;
+}
+async function render(){
+  const want = R.page, key = R.key;
+  let c;
+  try { c = await pageCanvas(want); } catch (e){ return; }
+  if (want !== R.page || key !== R.key) return;
+  c.className = R.dir ? "in-" + R.dir : "";
+  $("#stage").replaceChildren(c);
+}
+function prefetch(p){ if (R.doc && p >= 1 && p <= R.n) pageCanvas(p).catch(() => {}); }
+const next = () => { if (R.page < R.n) go(R.page + 1, "next"); };
+const prev = () => { if (R.page > 1) go(R.page - 1, "prev"); };
+
+/* input: tap edges to turn, tap middle for bars, swipe to turn */
+let down = null;
+$("#stage").addEventListener("pointerdown", e => { down = {x:e.clientX, y:e.clientY, t:Date.now(), id:e.pointerId}; });
+$("#stage").addEventListener("pointerup", e => {
+  if (!down || e.pointerId !== down.id) return;
+  const dx = e.clientX - down.x, dy = e.clientY - down.y, quick = Date.now() - down.t < 600;
+  down = null;
+  if (window.visualViewport && visualViewport.scale > 1.05) return;   // pinch-zoomed in: let the user pan
+  if (Math.abs(dx) > 50 && Math.abs(dy) < 90 && quick){ dx < 0 ? next() : prev(); return; }
+  if (Math.abs(dx) < 10 && Math.abs(dy) < 10){
+    const x = e.clientX / innerWidth;
+    if (x < .28) prev(); else if (x > .72) next(); else document.body.classList.toggle("hide");
+  }
+});
+$("#stage").addEventListener("pointercancel", () => { down = null; });
+document.addEventListener("keydown", e => {
+  if (["ArrowRight", "PageDown", " "].includes(e.key)){ e.preventDefault(); next(); }
+  else if (["ArrowLeft", "PageUp"].includes(e.key)){ e.preventDefault(); prev(); }
+});
+$("#next").onclick = next; $("#prev").onclick = prev;
+$("#slider").addEventListener("input", e => { $("#pg").textContent = `p.${label(+e.target.value)} · ${e.target.value}/${R.n}`; });
+$("#slider").addEventListener("change", e => go(+e.target.value));
+$("#pg").onclick = () => {
+  const v = prompt(`Go to page (printed page number, 1–${R.n} if unsure)`, label(R.page));
+  if (!v) return;
+  const idx = R.labels ? R.labels.indexOf(v.trim()) : -1;
+  go(idx >= 0 ? idx + 1 : +v);
+};
+$("#book").addEventListener("change", e => openBook(e.target.value));
+document.addEventListener("click", async e => {
+  const b = e.target.closest("#markread"); if (!b) return;
+  b.disabled = true;
+  const before = R.st ? R.st.player.xp : null, lvl = R.st ? R.st.player.level : null;
+  try {
+    const r = await api("/api/cmd", {args:["read", b.dataset.id]});
+    await loadState();
+    const gain = R.st && before !== null ? R.st.player.xp - before : 0;
+    if (r.code !== 0) toast("Couldn't mark it read");
+    else if (R.st && R.st.player.level > lvl) toast(`⭐ <b>Level ${R.st.player.level}</b> · ${esc(R.st.player.title)} · +${gain} XP`);
+    else toast(`✓ ${esc(b.dataset.id)} read${gain > 0 ? ` · <b style="color:var(--gold-2)">+${gain} XP</b>` : ""}`);
+  } catch (err){ toast("Couldn't reach your Mac: " + esc(err.message)); }
+  updateQuest();
+});
+let resizeTimer;
+addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { R.cache.clear(); render(); }, 150); });
+
+/* follow the Mac: "Open the book" on the map turns this page */
+async function poll(){
+  try {
+    const n = await api(`/api/nav?after=${R.seq}`);
+    $("#link").classList.add("on");
+    if (R.seq === -1) R.seq = n.seq;                 // ignore anything sent before this page opened
+    else if (n.seq > R.seq){
+      R.seq = n.seq;
+      if (n.key){
+        R.focus = n.quest || null;
+        await loadState();
+        await openBook(n.key, n.page);
+        document.body.classList.remove("hide");
+        const q = questAt(n.key, n.page);
+        toast(`📲 From your Mac${q ? ` · <b>${esc(q.id)}</b> ${esc(q.title)}` : ""} · p.${esc(label(n.page))}`);
+      }
+    }
+  } catch (e){ $("#link").classList.remove("on"); }
+  setTimeout(poll, document.hidden ? 4000 : 1200);
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) loadState().then(updateQuest); });
+
+/* boot */
+(async () => {
+  if (!window.pdfjsLib){ loading("Couldn't load the PDF reader (it needs an internet connection the first time)."); return; }
+  pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  poll();                                          // check in with the Mac right away
+  await loadState();
+  const books = (R.st && R.st.books) || [{key:"main", short:"C++ Crash Course"}];
+  $("#book").innerHTML = books.map(b => `<option value="${esc(b.key)}">${esc(b.short)}</option>`).join("");
+  const q = new URLSearchParams(location.search);
+  const key = q.get("book") || store.book || "main";
+  R.focus = q.get("quest");
+  if (!R.ticket) await openBook(books.some(b => b.key === key) ? key : "main", +q.get("page") || 0);
+  setTimeout(() => document.body.classList.add("hide"), 3500);
+})();
+</script>
+</body>
+</html>

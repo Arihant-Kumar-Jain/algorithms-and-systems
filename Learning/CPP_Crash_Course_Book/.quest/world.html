@@ -120,6 +120,9 @@ button{font:inherit;color:inherit;cursor:pointer}
 #hud-r{top:16px;right:16px}
 .ib{width:40px;height:40px;border-radius:12px;background:var(--panel);border:1px solid var(--line-2);display:grid;place-items:center;font-size:17px;position:relative;box-shadow:var(--shadow);transition:transform .12s,border-color .12s}
 .ib:hover{border-color:var(--gold);transform:translateY(-1px)}
+.ib .live{position:absolute;top:5px;right:5px;width:8px;height:8px;border-radius:50%;background:#6c7588}
+.ib .live.on{background:var(--teal);box-shadow:0 0 8px var(--teal)}
+body.remote .local-only{display:none!important}
 .ib small{position:absolute;bottom:-6px;right:-6px;background:var(--gold);color:#241c08;font-weight:700;font-size:10px;border-radius:99px;padding:1px 5px}
 .focus{height:40px;padding:0 15px;border-radius:12px;border:1px solid rgba(95,212,192,.5);background:rgba(20,48,48,.9);font-weight:600;font-size:13.5px;box-shadow:var(--shadow);display:flex;align-items:center;gap:8px;font-variant-numeric:tabular-nums}
 .focus.on{border-color:var(--red);background:rgba(58,20,22,.92)}
@@ -323,6 +326,7 @@ textarea:focus,input:focus{outline:2px solid rgba(230,192,104,.5);outline-offset
 <div id="hud-r" class="hud">
   <button id="b-focus" class="focus keep" data-act="focus" title="Focus timer: +1 XP per minute (10–90 per session)"><span class="dot"></span><span id="focus-t">Start focus</span></button>
   <button class="ib" data-act="journal" title="Write in your journal (J)">✎</button>
+  <button class="ib keep local-only" id="b-ipad" data-act="ipad" title="Read on your iPad">📲<span class="live" id="ipad-live"></span></button>
   <button class="ib keep" data-act="badges" title="Badges (B)">🏅<small id="badge-n">0</small></button>
   <button class="ib" data-act="chronicle" title="Recent activity (C)">📜</button>
   <button class="ib" data-act="undoLast" title="Undo your last action">↶</button>
@@ -947,7 +951,7 @@ setInterval(updateFocus, 1000);
 function renderNext(){
   const n = S.st.next, out = [];
   if (n.read) out.push(`<div class="nb card"><div class="nb-txt"><div class="nb-k">📖 Next read</div><div class="nb-t">${esc(n.read.id)} · ${esc(n.read.title)}</div><div class="nb-m">${esc(n.read.pages)} · +${n.read.xp} XP</div></div>
-    <div class="acts"><button class="btn ghost sm" data-act="locate" data-key="rd:${esc(n.read.id)}" title="Show on map">⌖</button><button class="btn sm" data-act="read" data-id="${esc(n.read.id)}">Mark read</button></div></div>`);
+    <div class="acts"><button class="btn ghost sm" data-act="locate" data-key="rd:${esc(n.read.id)}" title="Show on map">⌖</button>${bookBtn("main", n.read, "📖", "btn ghost sm")}<button class="btn sm" data-act="read" data-id="${esc(n.read.id)}">Mark read</button></div></div>`);
   if (n.ex) out.push(`<div class="nb card"><div class="nb-txt"><div class="nb-k">⚔ Next exercise ${"★".repeat(n.ex.stars)}</div><div class="nb-t">${esc(n.ex.id)} · ${esc(n.ex.title)}</div><div class="nb-m">+${n.ex.xp} XP${n.ex.path ? " · " + esc(n.ex.path.split("/").pop()) : ""}</div></div>
     <div class="acts"><button class="btn ghost sm" data-act="locate" data-key="ex:${esc(n.ex.id)}" title="Show on map">⌖</button>${n.ex.path ? `<button class="btn ghost sm" data-act="open" data-path="${esc(n.ex.path)}">Open</button>` : ""}<button class="btn teal sm" data-act="claim" data-id="${esc(n.ex.id)}">Claim</button></div></div>`);
   $("#next").innerHTML = out.join("");
@@ -976,6 +980,9 @@ function renderPanel(key){
   else if (it.type === "lab") [head, body] = pExercise(it.e, null, it.s);
   $("#ph").innerHTML = head; $("#pb").innerHTML = body;
 }
+function bookBtn(key, q, text, cls = "btn ghost"){
+  return `<button class="${cls}" data-act="pdf" data-key="${esc(key)}" data-pdf="${q ? q.pdf : 1}" data-label="${q ? esc(q.page) : ""}" data-quest="${q ? esc(q.id) : ""}">${text}</button>`;
+}
 function rowRead(q, prefix){
   return `<div class="row ${q.done ? "done" : ""}" data-sel="${prefix}:${esc(q.id)}"><span class="tk">${q.done ? "✓" : "○"}</span><span class="id">${esc(q.id)}</span><span class="tt" title="${esc(q.title)}">${esc(q.title)}${q.optional ? ' <span class="muted small">(opt)</span>' : ""}</span><span class="pg">${esc(q.pages)}</span>
     ${q.done ? `<button class="btn ghost sm" data-act="undo" data-id="${esc(q.id)}" title="Mark as unread">↶</button>` : `<button class="btn sm" data-act="read" data-id="${esc(q.id)}">+${q.xp}</button>`}</div>`;
@@ -991,7 +998,7 @@ function pChapter(c){
   const status = c.cleared ? chip(`🏁 cleared ${fmtDate(c.cleared)}`, "gold") : c.started ? chip("in progress", "ok") : c.num === S.st.current ? chip("you are here", "ok") : chip(c.optional ? "optional" : "unexplored");
   const head = `<div class="kick">Chapter ${c.num} · ${esc(part)}</div><h2>${esc(c.title)}</h2><div class="chips">${status}${chip("📖 " + esc(c.pages))}${chip(`📝 notes: ${c.notes_lines} line${c.notes_lines === 1 ? "" : "s"}${c.scribe ? " · bonus ✓" : ` (${Math.max(0, 10 - c.notes_lines)} to bonus)`}`)}</div>`;
   let b = `<div class="prog"><i style="width:${(frac * 100).toFixed(1)}%"></i></div><div class="small muted">${rd}/${c.reading.length} read · ${ed}/${req.length} exercises${c.cleared ? "" : ` · clear it for +100 XP`}</div>
-    <div class="acts"><button class="btn" data-act="pdf" data-page="${c.reading[0] ? esc(c.reading[0].page) : ""}">📖 Open the book</button><button class="btn ghost" data-act="open" data-path="${esc(c.notes)}">📝 Open notes</button></div>`;
+    <div class="acts">${bookBtn("main", c.reading.find(q => !q.done) || c.reading[0], "📖 Open the book", "btn")}<button class="btn ghost local-only" data-act="open" data-path="${esc(c.notes)}">📝 Open notes</button></div>`;
   b += `<div class="sec"><h3>Reading quests</h3>${c.reading.map(q => rowRead(q, "rd")).join("")}</div>`;
   if (c.exercises.length) b += `<div class="sec"><h3>Exercises${c.ex_page ? ` · book p.${c.ex_page}` : ""}</h3>${c.exercises.map(e => rowEx(e, "ex")).join("")}</div>`;
   S.st.bosses.filter(x => Math.max(...x.unlock) === c.num).forEach(x => { b += `<div class="hint">🐉 Clearing this chapter${x.unlock.length > 1 ? ` (with ch ${x.unlock.filter(n => n !== c.num).join(", ")})` : ""} unlocks <a href="#" data-act="selfly" data-key="boss:${x.n}" style="color:var(--red)">${esc(x.name)}</a>.</div>`; });
@@ -1003,8 +1010,8 @@ function pReading(q, c, s){
   const head = `<div class="kick">Reading quest ${esc(q.id)}</div><h2>${esc(q.title)}</h2><div class="chips">${q.done ? chip(`✓ read ${fmtDate(q.done)}`, "gold") : chip("not read yet")}${chip("📖 " + esc(q.pages))}${chip(`+${q.xp} XP`, "gold")}${q.optional ? chip("optional") : ""}</div>`;
   let b = `<p class="task muted">${where}. Read the pages, jot what matters in your notes, then mark it read.</p>
     <div class="acts">${q.done ? `<button class="btn ghost" data-act="undo" data-id="${esc(q.id)}">↶ Mark unread</button>` : `<button class="btn" data-act="read" data-id="${esc(q.id)}">✓ Mark read · +${q.xp} XP</button>`}
-    <button class="btn ghost" data-act="pdf" data-key="${s ? esc(s.key) : ""}" data-page="${esc(q.page)}">📖 Open book at ${esc(q.pages.split("–")[0])}</button>
-    <button class="btn ghost" data-act="open" data-path="${esc(c ? c.notes : s.notes)}">📝 Notes</button></div>`;
+    ${bookBtn(s ? s.key : "main", q, `📖 Open book at ${esc(q.pages.split("–")[0])}`)}
+    <button class="btn ghost local-only" data-act="open" data-path="${esc(c ? c.notes : s.notes)}">📝 Notes</button></div>`;
   b += `<div class="acts"><button class="btn ghost sm" data-act="selfly" data-key="${c ? "ch:" + c.num : "side:" + s.key}">← ${c ? "Chapter " + c.num : esc(s.short)}</button></div>`;
   return [head, b];
 }
@@ -1040,7 +1047,7 @@ function pSide(s){
   const head = `<div class="kick">Side quest · ${esc(s.author)}</div><h2>${esc(s.title)}</h2><div class="chips">${s.finished ? chip(`📗 finished ${fmtDate(s.finished)}`, "gold") : s.started ? chip("in progress", "ok") : chip("not started")}${chip(`${s.reading_done[0]}/${s.reading_done[1]} read`)}${chip(`${s.labs_done[0]}/${s.labs_done[1]} labs`)}${chip(`+${s.xp} XP when finished`, "gold")}</div>`;
   const tot = s.reading_done[1] + s.labs_done[1], got = s.reading_done[0] + s.labs_done[0];
   let b = `<div class="prog teal"><i style="width:${tot ? (got / tot * 100).toFixed(1) : 0}%"></i></div><div class="hint">${md(s.note)}</div><div class="hint">🧭 Best paired with: ${md(s.pairs_text)}.</div>
-    <div class="acts"><button class="btn" data-act="pdf" data-key="${esc(s.key)}">📖 Open the book</button><button class="btn ghost" data-act="open" data-path="${esc(s.notes)}">📝 Notes (${s.notes_lines})</button></div>`;
+    <div class="acts">${bookBtn(s.key, s.chapters.flatMap(sc => sc.reading).find(q => !q.done && !q.optional) || s.chapters[0].reading[0], "📖 Open the book", "btn")}<button class="btn ghost" data-act="open" data-path="${esc(s.notes)}">📝 Notes (${s.notes_lines})</button></div>`;
   b += `<div class="sec"><h3>Labs</h3>${s.labs.map(l => rowEx(l, "lab")).join("")}</div>`;
   s.chapters.forEach(sc => { b += `<div class="sec"><h3>Ch ${sc.num} · ${esc(sc.title)}${sc.optional ? " · optional" : ""}</h3>${sc.reading.map(q => rowRead(q, "sq")).join("")}</div>`; });
   return [head, b];
@@ -1062,7 +1069,8 @@ document.addEventListener("click", async e => {
   else if (act === "run") run(["run", d.id], findKey(d.id));
   else if (act === "attack") run(["boss", d.n], "boss:" + d.n);
   else if (act === "open"){ try { await api("/api/open", {path:d.path}); toast(`✎ Opening <b>${esc(d.path.split("/").pop())}</b> in your editor`); } catch (err){ toast("Couldn't open: " + esc(err.message)); } }
-  else if (act === "pdf"){ try { await api("/api/pdf", {key:d.key || null}); toast(`📖 Opening the book${d.page ? `. Jump to page <b>${esc(d.page)}</b> with ⌥⌘G in Preview` : ""}.`); } catch (err){ toast("Couldn't open the PDF: " + esc(err.message)); } }
+  else if (act === "pdf") openBook(d.key || "main", +d.pdf || 1, d.label, d.quest);
+  else if (act === "ipad") ipadModal();
   else if (act === "tick"){ SFX.tick(); try { await api("/api/tick", {n:+d.n, i:+d.i, on:d.on === "1"}); await refresh(false); } catch (err){ toast(esc(err.message)); } }
   else if (act === "locate" || act === "selfly"){ select(d.key); flyToKey(d.key, d.key.startsWith("ch") ? .95 : d.key.startsWith("side") ? .62 : d.key.startsWith("boss") ? .8 : 1.15); }
   else if (act === "close") closePanel();
@@ -1083,6 +1091,55 @@ document.addEventListener("click", async e => {
   else if (act === "saveLog"){ const t = $("#log-t").value.trim(); if (t){ closeModal(); run(["log", t]); } }
   else if (act === "stopSave"){ const t = $("#stop-t").value.trim(); closeModal(); run(t ? ["stop", t] : ["stop"]); }
 });
+const IS_LOCAL = ["127.0.0.1", "localhost", "[::1]", "::1"].includes(location.hostname);
+if (!IS_LOCAL) document.body.classList.add("remote");
+async function openBook(key, pdf, label, quest){
+  if (!IS_LOCAL){ location.href = `/read?book=${encodeURIComponent(key)}&page=${pdf}${quest ? "&quest=" + encodeURIComponent(quest) : ""}`; return; }
+  try {
+    const r = await api("/api/pdf", {key, page:pdf, quest});
+    if (r.where === "ipad") toast(`📲 Sent to your iPad · page <b>${esc(label || pdf)}</b>`);
+    else toast(`📖 Opening the book on your Mac. Jump to page <b>${esc(label || pdf)}</b> with ⌥⌘G in Preview.${S.ipad && S.ipad.lan ? "" : ` <span class="muted">Reading on an iPad? Click 📲.</span>`}`);
+  } catch (err){ toast("Couldn't open the book: " + esc(err.message)); }
+}
+function loadScript(src){
+  return new Promise((ok, bad) => {
+    if ([...document.scripts].some(s => s.src === src)) return ok();
+    const s = document.createElement("script"); s.src = src; s.onload = ok; s.onerror = bad; document.head.appendChild(s);
+  });
+}
+async function pairPoll(){
+  if (!IS_LOCAL) return;
+  try { S.ipad = await api("/api/pair"); $("#ipad-live").classList.toggle("on", !!(S.ipad.lan && S.ipad.connected)); } catch (e) {}
+}
+let pairTimer = null;
+async function ipadModal(){
+  await pairPoll();
+  const p = S.ipad;
+  if (!p) { toast("Couldn't reach the world server."); return; }
+  if (!p.lan){
+    openModal(`<h2>📲 Read on your iPad</h2><p class="muted">Your iPad can show the book and jump to the right page whenever you click <b>Open the book</b> here.</p>
+      <div class="hint">1. Stop the world in your terminal with <kbd>Ctrl</kbd>-<kbd>C</kbd>.<br>2. Start it again with <code>./quest world --ipad</code><br>3. Click 📲 and scan the QR code with your iPad's camera.</div>
+      <div class="acts"><button class="btn ghost" data-act="modalClose">Got it</button></div>`);
+    return;
+  }
+  openModal(`<h2>📲 Read on your iPad</h2><p class="muted">Point the iPad's camera at this code (both devices on the same Wi-Fi). It opens the reader; after that, <b>Open the book</b> here turns the iPad to that page.</p>
+    <div id="qr" style="background:#fff;padding:14px;border-radius:14px;width:max-content;margin:16px auto;min-width:150px;min-height:150px;display:grid;place-items:center;color:#333;font-size:12px">loading…</div>
+    <code class="path">${esc(p.url)}</code>${p.alt ? `<div class="small muted" style="margin-top:8px">If the Mac's IP address changes, this one keeps working: <code>${esc(p.alt)}</code></div>` : ""}
+    <div class="hint" id="pair-st">${p.connected ? "✅ iPad connected." : "⏳ Waiting for your iPad…"}</div>
+    <div class="hint">Tip: on the iPad, tap Share → <b>Add to Home Screen</b> for a full-screen Quest Reader app.</div>
+    <div class="acts"><button class="btn ghost" data-act="modalClose">Done</button></div>`);
+  try {
+    await loadScript("https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js");
+    const qr = qrcode(0, "M"); qr.addData(p.url); qr.make();
+    $("#qr").innerHTML = qr.createSvgTag(5, 0);
+  } catch (e){ $("#qr").textContent = "The QR code needs internet. Type the address below into Safari instead."; }
+  clearInterval(pairTimer);
+  pairTimer = setInterval(async () => {
+    if (!$("#modal").classList.contains("show") || !$("#pair-st")){ clearInterval(pairTimer); return; }
+    await pairPoll();
+    if (S.ipad) $("#pair-st").innerHTML = S.ipad.connected ? "✅ iPad connected. Click <b>Open the book</b> on any quest to send its page there." : "⏳ Waiting for your iPad…";
+  }, 2000);
+}
 function findKey(id){
   for (const p of ["rd", "ex", "sq", "lab"]) if (S.idx[p + ":" + id]) return p + ":" + id;
   return S.sel;
@@ -1127,6 +1184,7 @@ function helpModal(){
       <span><kbd>F</kbd></span><span>fly to where you are</span>
       <span><kbd>M</kbd></span><span>whole world · <kbd>U</kbd> sky (side quests)</span>
       <span><kbd>B</kbd> <kbd>C</kbd> <kbd>J</kbd></span><span>badges · chronicle · journal</span>
+      <span>📲</span><span>read on your iPad: "Open the book" then turns the iPad's page</span>
       <span><kbd>Esc</kbd></span><span>close panels</span>
     </div>
     <div class="hint">○ gold circles are reading quests · ◇ teal diamonds are exercises (pips = difficulty) · shields are bosses · the sky holds four side-quest books as constellations. Fog lifts from a chapter once you start it.</div>
@@ -1210,6 +1268,7 @@ addEventListener("resize", () => { clampView(); schedule(); });
 addEventListener("focus", () => refresh(true));
 setInterval(() => { if (!document.hidden) refresh(true); }, 20000);
 $("#b-sound").textContent = store.mute ? "🔇" : "🔊";
+pairPoll(); setInterval(() => { if (!document.hidden) pairPoll(); }, 5000);
 (async () => {
   await refresh(false);
   if (!S.st){ $("#loading .s").textContent = "Can't reach the world server. Run ./quest world in your terminal."; return; }
