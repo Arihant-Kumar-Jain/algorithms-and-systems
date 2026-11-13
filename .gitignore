@@ -1,0 +1,44 @@
+# ── Compiled programs ────────────────────────────────────────────────
+# clang++ / g++ write executables with no file extension, right next to
+# their .cpp. So ignore every extensionless file, but keep folders and any
+# file that has a dot in its name…
+*
+!*/
+!*.*
+
+# …and keep the extensionless files that are real sources or scripts.
+# Saved a source file without an extension? Add a "!path" line here.
+!Makefile
+!makefile
+!GNUmakefile
+!LICENSE
+!README
+!Learning/CPP_Crash_Course_Book/quest
+!Learning/Random/terminal
+!SublimeC++/Contest Codeforces 9 NOV 2024
+!SublimeC++/atcoder
+!SublimeC++/random_AVL
+!SublimeC++/CSES_BUILDING_ROADS
+!opencv_project/src/finger_count
+!usaco/cses
+
+# ── Other build output ───────────────────────────────────────────────
+*.dSYM/
+*.o
+*.out
+.build/
+
+# ── macOS & editors ──────────────────────────────────────────────────
+.DS_Store
+*.swp
+*~
+
+# ── Jupyter autosaves ────────────────────────────────────────────────
+.ipynb_checkpoints/
+
+# ── Xcode per-user state ─────────────────────────────────────────────
+xcuserdata/
+*.xcuserstate
+
+# ── Book PDFs (copyrighted and large; keep them local) ───────────────
+Learning/CPP_Crash_Course_Book/**/*.pdf

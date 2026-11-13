@@ -1,7 +1,0 @@
----
-triple:          'arm64-apple-darwin'
-binary-path:     '/Users/arihantkumarjain/Desktop/Coding/C++ FOLDERS/VScode C++/Codeforces/test'
-relocations:
-  - { offset: 0x514D, size: 0x8, addend: 0x0, symName: __ZStL8__ioinit, symObjAddr: 0x15C18, symBinAddr: 0x100008000, symSize: 0x0 }
-  - { offset: 0x52B6, size: 0x8, addend: 0x0, symName: _main, symObjAddr: 0x0, symBinAddr: 0x100003E90, symSize: 0x28 }
-...
