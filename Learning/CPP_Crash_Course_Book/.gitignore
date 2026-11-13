@@ -1,0 +1,5 @@
+# build outputs from ./quest run / done / boss
+.build/
+*.dSYM/
+.quest/*.tmp
+.DS_Store

@@ -1,0 +1,10 @@
+SET lang cpp
+GET lang
+GET missing
+INCR hits
+INCR hits
+COUNT
+DEL lang
+DEL lang
+COUNT
+QUIT

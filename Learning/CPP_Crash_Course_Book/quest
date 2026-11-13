@@ -1,0 +1,1722 @@
+#!/usr/bin/env python3
+"""
+quest — a small RPG that tracks your run through *C++ Crash Course*.
+
+    ./quest            dashboard: level, streak, today's goal, what to do next
+    ./quest help       every command
+
+All progress lives in .quest/save.json as an append-only list of events.
+XP, levels, streaks and badges are recomputed from those events every time,
+so `./quest undo` is always safe. Standard library only (Python 3.8+).
+"""
+from __future__ import annotations
+
+import difflib
+import hashlib
+import json
+import os
+import random
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import textwrap
+from collections import defaultdict
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from types import SimpleNamespace
+
+ROOT = Path(__file__).resolve().parent
+QDIR = ROOT / ".quest"
+BOOK_FILE = QDIR / "book.json"
+SAVE_FILE = QDIR / "save.json"
+BUILD = ROOT / ".build"
+JOURNAL = ROOT / "journal.md"
+PROGRESS = ROOT / "PROGRESS.md"
+PROJECTS = ROOT / "projects"
+
+# ───────────────────────────── tunables ─────────────────────────────
+XP_STARS = {1: 30, 2: 50, 3: 80}   # code exercise by difficulty
+XP_CLEAN = 10                      # bonus: zero compiler warnings
+XP_NONCODE = 15                    # reading / research / debugger tasks
+XP_CHAPTER = 100
+XP_PART = {1: 500, 2: 1000}
+XP_BOOK = 1000
+XP_SCRIBE = 30                     # notes.md has real content
+XP_BADGE = 25
+XP_DAILY_GOAL = 25
+SESSION_MIN, SESSION_CAP_XP, SESSION_CAP_MIN = 10, 90, 180
+REVIEW_XP, REVIEW_CAP = 2, 20      # per correct card, per day
+SCRIBE_LINES = 10
+DEFAULT_GOAL = 100
+STREAK_BONUS, STREAK_BONUS_CAP = 3, 10
+MAX_FREEZES = 2
+
+TITLES = [
+    "Hello, World", "Semicolon Seeker", "Compiler Whisperer", "Type Tamer",
+    "Pointer Wrangler", "Reference Ranger", "RAII Apprentice", "Exception Juggler",
+    "Move Semantics Monk", "Template Tinkerer", "Lambda Mage", "Test-Driven Knight",
+    "Smart Pointer Sage", "Container Commander", "Iterator Pathfinder", "String Sorcerer",
+    "Algorithm Alchemist", "Concurrency Conjurer", "Network Navigator", "Crash Course Conqueror",
+]
+
+# ───────────────────────────── terminal helpers ─────────────────────────────
+COLOR = sys.stdout.isatty() and "NO_COLOR" not in os.environ
+
+
+def _c(code):
+    return (lambda s: f"\033[{code}m{s}\033[0m") if COLOR else (lambda s: str(s))
+
+
+B, DIM, RED, GRN, YEL, BLU, MAG, CYN = (_c(x) for x in ("1", "2", "31", "32", "33", "34", "35", "36"))
+
+
+def bar(frac, width=20):
+    frac = max(0.0, min(1.0, frac))
+    n = int(round(frac * width))
+    return "█" * n + "░" * (width - n)
+
+
+def spark(values):
+    ticks = "▁▂▃▄▅▆▇█"
+    top = max(values) if values and max(values) > 0 else 1
+    return "".join("·" if v <= 0 else ticks[min(7, int(v / top * 7.999))] for v in values)
+
+
+def fmt(n):
+    return f"{n:,}"
+
+
+def die(msg, code=1):
+    print(RED("✗ ") + msg)
+    sys.exit(code)
+
+
+def rel(p):
+    try:
+        return str(Path(p).resolve().relative_to(ROOT))
+    except ValueError:
+        return str(p)
+
+
+def wrap(text, indent, width=78):
+    return textwrap.fill(text, width=width, initial_indent=indent, subsequent_indent=indent)
+
+
+def now():
+    fake = os.environ.get("QUEST_NOW")  # handy for testing streaks
+    return datetime.fromisoformat(fake) if fake else datetime.now().replace(microsecond=0)
+
+
+def iso(d):
+    return d.isoformat(timespec="seconds")
+
+
+def stars(n):
+    return "★" * n + " " * (3 - n)
+
+
+def hm(minutes):
+    h, m = divmod(int(minutes), 60)
+    return f"{h}h {m:02d}m" if h else f"{m}m"
+
+
+def threshold(level):
+    k = level - 1
+    return 60 * k * k + 180 * k   # Lv 20 ≈ 25k XP ≈ the whole book plus steady habits
+
+
+def level_for(xp):
+    lv = 1
+    while threshold(lv + 1) <= xp:
+        lv += 1
+    return lv
+
+
+def title_for(lv):
+    return TITLES[lv - 1] if lv <= len(TITLES) else f"Legend ★{lv - len(TITLES)}"
+
+
+# ───────────────────────────── book + save ─────────────────────────────
+class Book:
+    def __init__(self):
+        if not BOOK_FILE.exists():
+            die(f"Missing {rel(BOOK_FILE)} — this folder's level data is gone.")
+        d = json.loads(BOOK_FILE.read_text(encoding="utf-8"))
+        self.title = d["title"]
+        self.companion = d.get("companion_code", "")
+        self.chapters = d["chapters"]
+        self.ch = {c["num"]: c for c in self.chapters}
+        self.bosses = {b["n"]: b for b in d["bosses"]}
+        self.reading, self.ex = {}, {}
+        for c in self.chapters:
+            for q in c["reading"]:
+                self.reading[q["id"]] = (c, q)
+            for e in c["exercises"]:
+                self.ex[e["id"]] = (c, e)
+        self.side = {s["key"]: s for s in d.get("side", [])}
+        for s in self.side.values():
+            for sc in s["chapters"]:
+                for q in sc["reading"]:
+                    self.reading[q["id"]] = (s, q)
+            for lab in s["labs"]:
+                self.ex[lab["id"]] = (s, lab)
+
+    def ex_path(self, c, e):
+        return ROOT / c["dir"] / "exercises" / e["file"].rstrip("/")
+
+    @staticmethod
+    def is_dir(e):
+        return e["file"].endswith("/")
+
+    @staticmethod
+    def ex_xp(e):
+        return XP_STARS[e["stars"]] if e["kind"] in ("code", "lab") else XP_NONCODE
+
+    @staticmethod
+    def required_ex(c):
+        return [e for e in c["exercises"] if not e["optional"]]
+
+    def boss_dir(self, b):
+        return PROJECTS / b["dir"]
+
+    def pdf(self):
+        pdfs = sorted(ROOT.glob("*.pdf"))
+        named = [p for p in pdfs if "crash course" in p.name.lower()]
+        return (named or pdfs or [None])[0]
+
+    def side_pdf(self, s):
+        hits = sorted(p for p in ROOT.rglob("*.pdf") if s["pdf_match"] in p.name.lower())
+        return hits[0] if hits else None
+
+
+def pages_of(q):
+    return f"p.{q['page']}–{q.get('page_end', q['end'])}"
+
+
+def is_side_id(i):
+    return not i.split(".")[0].split("-")[0].isdigit()
+
+
+def load_save():
+    s = json.loads(SAVE_FILE.read_text(encoding="utf-8")) if SAVE_FILE.exists() else {}
+    s.setdefault("version", 1)
+    s.setdefault("created", iso(now()))
+    s.setdefault("settings", {}).setdefault("daily_goal", DEFAULT_GOAL)
+    s.setdefault("events", [])
+    s.setdefault("session", None)
+    s.setdefault("cards", {})
+    s.setdefault("badge_dates", {})
+    return s
+
+
+def write_save(s):
+    QDIR.mkdir(exist_ok=True)
+    tmp = SAVE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(s, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    tmp.replace(SAVE_FILE)
+
+
+# ───────────────────────────── badges ─────────────────────────────
+BADGES = [
+    ("first_steps", "🐣", "First Steps", "Finish your first reading quest", lambda k: len(k.read) >= 1),
+    ("first_blood", "⚔️", "First Blood", "Complete your first exercise", lambda k: len(k.exd) >= 1),
+    ("first_clear", "🏁", "Chapter Down", "Clear any chapter", lambda k: any(v.cleared for v in k.chap.values())),
+    ("streak3", "🔥", "On Fire", "Reach a 3-day streak", lambda k: k.best >= 3),
+    ("streak7", "⚡", "Unstoppable", "Reach a 7-day streak", lambda k: k.best >= 7),
+    ("streak21", "🧠", "Habit Forged", "Reach a 21-day streak", lambda k: k.best >= 21),
+    ("streak50", "🏔️", "Iron Will", "Reach a 50-day streak", lambda k: k.best >= 50),
+    ("comeback", "🔄", "Comeback Kid", "Return after a 7+ day break (it's never too late)", lambda k: k.max_gap >= 7),
+    ("clean10", "✨", "Zero Warnings", "10 exercises with a warning-free build", lambda k: k.clean >= 10),
+    ("clean50", "💎", "Pedantic", "50 exercises with a warning-free build", lambda k: k.clean >= 50),
+    ("spicy", "🌶️", "Spicy", "Complete 10 ★★★ exercises", lambda k: k.hard >= 10),
+    ("deep_work", "⏱️", "Deep Work", "Log one 90+ minute focus session", lambda k: k.longest >= 90),
+    ("hours10", "📚", "Ten Hours In", "Log 10 hours of focus sessions", lambda k: k.minutes >= 600),
+    ("hours50", "🏛️", "Fifty Hours In", "Log 50 hours of focus sessions", lambda k: k.minutes >= 3000),
+    ("night_owl", "🦉", "Night Owl", "Study between midnight and 4 am", lambda k: any(0 <= h < 4 for h in k.hours)),
+    ("early_bird", "🐦", "Early Bird", "Study between 5 and 7 am", lambda k: any(5 <= h < 7 for h in k.hours)),
+    ("scribe", "📜", "Scribe", "Earn the notes bonus in 5 chapters", lambda k: len(k.scribe) >= 5),
+    ("memory", "♻️", "Memory Palace", "Answer 100 flashcards correctly", lambda k: k.cards_ok >= 100),
+    ("speedrun", "🏃", "Speedrunner", "Clear a chapter (2 or later) within 3 days of starting it", lambda k: k.speedrun),
+    ("halfway", "🌓", "Halfway There", "Finish 50% of the book's required quests", lambda k: k.frac >= 0.5),
+    ("boss1", "🐉", "Boss Slayer", "Defeat your first boss", lambda k: len(k.boss) >= 1),
+    ("part1", "🏰", "Core Language Conquered", "Clear Part I (chapters 1–9)", lambda k: k.part_done[1]),
+    ("part2", "🌐", "Library Master", "Clear Part II (chapters 10–21)", lambda k: k.part_done[2]),
+    ("all_bosses", "👑", "Bossbane", "Defeat all 8 bosses", lambda k: len(k.boss) >= k.n_bosses),
+    ("side_first", "🧭", "Side Tracked", "Finish your first side-quest reading or lab", lambda k: k.side_any),
+    ("bookworm", "📗", "Bookworm", "Finish a whole side-quest book", lambda k: any(v.finished for v in k.side.values())),
+    ("scholar", "🎓", "Scholar", "Finish all four side-quest books", lambda k: bool(k.side) and all(v.finished for v in k.side.values())),
+    ("conqueror", "🏆", "Crash Course Conqueror", "Clear every chapter and every boss", lambda k: k.book_done),
+    ("completionist", "🌟", "Completionist", "...and every optional quest too", lambda k: k.completionist),
+]
+BADGE_BY_ID = {b[0]: b for b in BADGES}
+
+PARTS = {1: range(1, 10), 2: range(10, 22)}
+SOURCE_NAMES = {"read": "📖 Reading", "ex": "⚔️ Exercises", "boss": "🐉 Bosses", "clear": "🏁 Chapter clears",
+                "part": "🏰 Part clears", "book": "🏆 Book", "session": "⏱️ Focus sessions", "review": "♻️ Flashcards",
+                "scribe": "📜 Notes bonuses", "streak": "🔥 Streak bonuses", "goal": "🎯 Daily goals", "badge": "🏅 Badges",
+                "side": "🗺️ Side quests"}
+ACTIONS = {"read", "ex", "boss", "session", "review"}
+
+
+# ───────────────────────────── the rules engine ─────────────────────────────
+def compute(book, save):
+    k = SimpleNamespace()
+    events = sorted(save["events"], key=lambda e: e["at"])
+    k.read, k.exd, k.boss, k.scribe = {}, {}, {}, {}
+    k.sessions, k.hours = [], []
+    ledger = []                      # (at, xp, kind, label)
+    action_xp = defaultdict(int)     # per day, used for the daily goal + sparkline
+    review_xp = defaultdict(int)
+    active = set()
+    k.cards_ok = 0
+
+    for e in events:
+        t, at = e["t"], e["at"]
+        d = at[:10]
+        kind = t
+        is_action = t in ACTIONS
+        if t == "read":
+            if e["id"] not in book.reading or e["id"] in k.read:
+                continue
+            _, q = book.reading[e["id"]]
+            k.read[e["id"]] = at
+            xp, label = q["xp"], f"📖 {q['id']} {q['title']}"
+            if is_side_id(e["id"]):
+                kind, label = "side", f"🗺️ {q['id']} {q['title']}"
+        elif t == "ex":
+            if e["id"] not in book.ex or e["id"] in k.exd:
+                continue
+            _, x = book.ex[e["id"]]
+            k.exd[e["id"]] = e
+            bonus = XP_CLEAN if (e.get("clean") and x["kind"] == "code") else 0
+            xp, label = Book.ex_xp(x) + bonus, f"⚔️ {x['id']} {x['title']}" + (" ✨" if bonus else "")
+            if x["kind"] == "lab":
+                kind, label = "side", f"🧪 {x['id']} {x['title']}"
+        elif t == "boss":
+            b = book.bosses.get(e["n"])
+            if not b or e["n"] in k.boss:
+                continue
+            k.boss[e["n"]] = at
+            xp, label = b["xp"], f"🐉 Boss {b['n']} · {b['name']} defeated"
+        elif t == "session":
+            k.sessions.append(e)
+            xp = min(SESSION_CAP_XP, e["min"]) if e["min"] >= SESSION_MIN else 0
+            label = f"⏱️ {e['min']} min focus session"
+            is_action = e["min"] >= SESSION_MIN
+        elif t == "review":
+            k.cards_ok += e["ok"]
+            xp = max(0, min(REVIEW_CAP - review_xp[d], REVIEW_XP * e["ok"]))
+            review_xp[d] += xp
+            label = f"♻️ Reviewed {e['n']} flashcards ({e['ok']} ✓)"
+            is_action = e["n"] > 0
+        elif t == "scribe":
+            if e["ch"] in k.scribe:
+                continue
+            k.scribe[e["ch"]] = at
+            xp, label = XP_SCRIBE, f"📜 Notes bonus · {unit_name(book, e['ch'])}"
+        else:
+            continue
+        ledger.append((at, xp, kind, label))
+        if is_action:
+            active.add(d)
+            action_xp[d] += xp
+            k.hours.append(int(at[11:13]))
+
+    # chapters
+    k.chap = {}
+    done_req = total_req = 0
+    for c in book.chapters:
+        n = c["num"]
+        req_e = Book.required_ex(c)
+        dr = [q for q in c["reading"] if q["id"] in k.read]
+        de = [x for x in req_e if x["id"] in k.exd]
+        times = [k.read[q["id"]] for q in dr] + [k.exd[x["id"]]["at"] for x in de]
+        any_times = times + [k.exd[x["id"]]["at"] for x in c["exercises"] if x["optional"] and x["id"] in k.exd]
+        cleared = len(dr) == len(c["reading"]) and len(de) == len(req_e)
+        v = SimpleNamespace(
+            reading=(len(dr), len(c["reading"])), ex=(len(de), len(req_e)),
+            opt=(sum(1 for x in c["exercises"] if x["optional"] and x["id"] in k.exd),
+                 sum(1 for x in c["exercises"] if x["optional"])),
+            cleared=cleared, cleared_at=max(times) if cleared and times else None,
+            first_at=min(any_times) if any_times else None, started=bool(any_times),
+        )
+        k.chap[n] = v
+        if cleared and v.cleared_at:
+            ledger.append((v.cleared_at, XP_CHAPTER, "clear", f"🏁 Chapter {n} cleared · {c['title']}"))
+        if not c["optional"]:
+            done_req += len(dr) + len(de)
+            total_req += len(c["reading"]) + len(req_e)
+    k.frac = done_req / total_req if total_req else 0
+    k.done_req, k.total_req = done_req, total_req
+
+    k.part_done = {}
+    for p, rng in PARTS.items():
+        ok = all(k.chap[n].cleared for n in rng)
+        k.part_done[p] = ok
+        if ok:
+            ledger.append((max(k.chap[n].cleared_at for n in rng), XP_PART[p], "part", f"🏰 Part {p} complete"))
+    k.n_bosses = len(book.bosses)
+    k.book_done = all(k.part_done.values()) and len(k.boss) == k.n_bosses
+    if k.book_done:
+        ledger.append((max([k.chap[n].cleared_at for n in range(1, 22)] + list(k.boss.values())), XP_BOOK, "book", "🏆 BOOK COMPLETE"))
+    k.completionist = k.book_done and k.chap[0].cleared and all(
+        x["id"] in k.exd for c in book.chapters for x in c["exercises"])
+
+    k.side = {}
+    for s in book.side.values():
+        allq = [q for sc in s["chapters"] for q in sc["reading"]]
+        req = [q for q in allq if not q["optional"]]
+        dr = [q for q in req if q["id"] in k.read]
+        dl = [x for x in s["labs"] if x["id"] in k.exd]
+        times = [k.read[q["id"]] for q in dr] + [k.exd[x["id"]]["at"] for x in dl]
+        opt_read = sum(1 for q in allq if q["optional"] and q["id"] in k.read)
+        fin = len(dr) == len(req) and len(dl) == len(s["labs"])
+        v = SimpleNamespace(reading=(len(dr), len(req)), labs=(len(dl), len(s["labs"])),
+                            opt=(opt_read, len(allq) - len(req)), finished=fin,
+                            finished_at=max(times) if fin and times else None, started=bool(times) or opt_read > 0,
+                            last=max(times + [k.read[q["id"]] for q in allq if q["id"] in k.read], default=""))
+        k.side[s["key"]] = v
+        if fin and v.finished_at:
+            ledger.append((v.finished_at, s["xp"], "side", f"📗 Side quest complete · {s['short']}"))
+    k.side_any = any(v.started for v in k.side.values())
+
+    # streaks (with freezes: every 7 streak days banks one, max 2; a freeze covers one missed day)
+    days = sorted(date.fromisoformat(d) for d in active)
+    streak = freezes = best = max_gap = 0
+    prev = None
+    for d in days:
+        if prev is None:
+            streak = 1
+        else:
+            gap = (d - prev).days - 1
+            max_gap = max(max_gap, gap)
+            if gap == 0:
+                streak += 1
+            elif gap <= freezes:
+                freezes -= gap
+                streak += 1
+            else:
+                streak = 1
+        if streak % 7 == 0:
+            freezes = min(MAX_FREEZES, freezes + 1)
+        best = max(best, streak)
+        bonus = STREAK_BONUS * min(streak, STREAK_BONUS_CAP)
+        ledger.append((f"{d.isoformat()}T23:59:59", bonus, "streak", f"🔥 Day-{streak} streak bonus"))
+        prev = d
+    today = now().date()
+    k.today_active = prev == today
+    if prev is None:
+        k.streak = 0
+    elif prev == today or (today - prev).days - 1 <= freezes:
+        k.streak = streak
+    else:
+        k.streak = 0
+    k.best, k.freezes, k.max_gap = best, freezes, max_gap
+    k.at_risk = k.streak > 0 and not k.today_active
+    k.freeze_needed = 0 if prev is None else max(0, (today - prev).days - 1)
+
+    # daily goal
+    k.goal = save["settings"]["daily_goal"]
+    for d, x in action_xp.items():
+        if x >= k.goal:
+            ledger.append((f"{d}T23:59:58", XP_DAILY_GOAL, "goal", "🎯 Daily goal reached"))
+    k.today_xp = action_xp.get(today.isoformat(), 0)
+    k.last14 = [action_xp.get((today - timedelta(days=i)).isoformat(), 0) for i in range(13, -1, -1)]
+    k.action_xp = dict(action_xp)
+
+    # misc stats for badges
+    k.clean = sum(1 for e in k.exd.values() if e.get("clean") and book.ex[e["id"]][1]["kind"] == "code")
+    k.hard = sum(1 for i in k.exd if book.ex[i][1]["stars"] == 3)
+    k.minutes = sum(s["min"] for s in k.sessions)
+    k.longest = max((s["min"] for s in k.sessions), default=0)
+    k.speedrun = any(
+        v.cleared and v.first_at and n >= 2 and
+        datetime.fromisoformat(v.cleared_at) - datetime.fromisoformat(v.first_at) <= timedelta(days=3)
+        for n, v in k.chap.items())
+
+    k.badges = [b[0] for b in BADGES if b[4](k)]
+    for bid in k.badges:
+        b = BADGE_BY_ID[bid]
+        ledger.append((save["badge_dates"].get(bid, iso(now())), XP_BADGE, "badge", f"{b[1]} Badge: {b[2]}"))
+
+    ledger.sort(key=lambda r: r[0])
+    k.ledger = ledger
+    k.xp = sum(r[1] for r in ledger)
+    k.level = level_for(k.xp)
+    k.lo, k.hi = threshold(k.level), threshold(k.level + 1)
+    k.current = next((n for n in range(1, 22) if not k.chap[n].cleared), None)
+    return k
+
+
+# ───────────────────────────── scaffolding (templates) ─────────────────────────────
+JOURNAL_TEMPLATE = """# 📓 Study Journal · C++ Crash Course
+
+Your learning log. `./quest log "..."` adds a timestamped line, `./quest stop "..."`
+adds a session summary, and milestones (level-ups, cleared chapters, bosses,
+badges) get recorded here automatically. Write freely between entries too:
+what clicked, what didn't, what to try next.
+"""
+
+CHEATSHEET_TEMPLATE = ""
+
+GITIGNORE = """# build outputs from ./quest run / done / boss
+.build/
+*.dSYM/
+.quest/*.tmp
+.DS_Store
+"""
+
+
+def notes_template(c):
+    return ""  # blank slate: you write everything yourself
+
+
+def stub_template(c, exs, is_dir):
+    return ""  # blank slate: you write everything yourself
+
+
+def side_notes_template(s):
+    return ""  # blank slate: you write everything yourself
+
+
+def side_index(book):
+    lines = ["# 🗺️ Side Quests", "",
+             "Optional books that sit alongside C++ Crash Course. They earn XP and count as study days for your streak,",
+             "but they never block chapter clears or bosses. Pick one up when it fits what you're working on.", "",
+             "| Key | Book | Quests | Labs | Reward | Pairs with |", "|---|---|---|---|---|---|"]
+    for s in book.side.values():
+        nq = sum(len(sc["reading"]) for sc in s["chapters"])
+        nopt = sum(1 for sc in s["chapters"] for q in sc["reading"] if q["optional"])
+        lines.append(f"| `{s['key']}` | [{s['title']}]({Path(s['dir']).name}/notes.md) · {s['author']} | {nq - nopt} (+{nopt} optional) "
+                     f"| {len(s['labs'])} | {s['xp']} XP | {s['pairs_text']} |")
+    lines += ["", "## How to play", "",
+              "```bash",
+              "./quest side            # all side books + progress",
+              "./quest side dbg        # one book: its quests, page ranges and labs",
+              "./quest read dbg        # mark the next quest in that book as read",
+              "./quest done dbg-1 \"what happened\"   # claim a lab",
+              "./quest pdf dbg         # open the book",
+              "```", ""]
+    return "\n".join(lines)
+
+
+def boss_readme(book, b):
+    chs = ", ".join(str(n) for n in b["unlock"])
+    build = {"sanitize": "with AddressSanitizer + UBSan", "tsan": "with ThreadSanitizer",
+             "plain": "", "boost": "against Boost"}[b["build"]]
+    lines = [f"# 🐉 Boss {b['n']} · {b['name']}", "",
+             f"> Unlocks after clearing chapters **{chs}** · Reward **{b['xp']} XP** · Fight: `./quest boss {b['n']}`",
+             "", b["pitch"], "",
+             "## Win conditions",
+             "Tick a box (`- [x]`) only when it's genuinely done. Every tick takes a chunk off the boss's HP.", ""]
+    lines += [f"- [ ] {g}" for g in b["goals"]]
+    lines += ["", "## How the fight works",
+              f"- `./quest boss {b['n']}` compiles every `.cpp` in this folder (except `tests/`) {build}".rstrip() + "."]
+    if b["n"] == 5:
+        lines += ["- Then every `tests/<name>.in` is piped into the program and the output is compared with `tests/<name>.out`."]
+    elif b["build"] in ("sanitize", "tsan") and b["n"] != 7:
+        arg = " ".join(b["args"])
+        lines += [f"- Then it runs `./{b['dir']}{(' ' + arg) if arg else ''}`, which must exit with code 0 (your self-test)."]
+    lines += ["- The boss falls when **all** boxes are ticked **and** the build (plus any tests) passes.",
+              f"- Run it by hand any time: `./quest run boss{b['n']} -- <args>`", ""]
+    if b["n"] == 5:
+        lines += ["## Protocol (what the tests expect)",
+                  "| Command | Output |", "|---|---|",
+                  "| `SET k v` | `OK` |", "| `GET k` | the value, or `(nil)` |", "| `DEL k` | `1` if removed, else `0` |",
+                  "| `INCR k` | the new integer value (missing keys start at 0) |", "| `COUNT` | number of keys |",
+                  "| `KEYS <regex>` | matching keys, sorted, one per line |", "| `HISTORY n` | last n commands, oldest first |",
+                  "| `QUIT` | exits (no output) |", "",
+                  "Unknown commands print `ERR unknown command`.", ""]
+    lines += ["## Battle notes", "<!-- Design decisions, what was hard, what you'd do differently. -->", ""]
+    return "\n".join(lines)
+
+
+def boss_stub(b):
+    return ""  # blank slate: you write everything yourself
+
+
+def projects_index(book):
+    lines = ["# 🐉 Boss Fights", "",
+             "Projects that pull several chapters together. Each one unlocks when you've cleared its chapters.",
+             "Open the boss's README for the spec, then run `./quest boss <n>` to attack.", "",
+             "| # | Boss | Unlocks after chapters | Reward |", "|---|---|---|---|"]
+    for b in book.bosses.values():
+        lines.append(f"| {b['n']} | [{b['name']}]({b['dir']}/README.md) | {', '.join(map(str, b['unlock']))} | {b['xp']} XP |")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def scaffold(book):
+    files = {}
+    for c in book.chapters:
+        base = ROOT / c["dir"]
+        files[base / "notes.md"] = notes_template(c)
+        files[base / "listings" / ".gitkeep"] = ""
+        groups = {}
+        for e in c["exercises"]:
+            if e["file"]:
+                groups.setdefault(e["file"], []).append(e)
+        for f, exs in groups.items():
+            p = base / "exercises" / f.rstrip("/")
+            if f.endswith("/"):
+                files[p / "main.cpp"] = stub_template(c, exs, True)
+            else:
+                files[p] = stub_template(c, exs, False)
+    files[PROJECTS / "README.md"] = projects_index(book)
+    for b in book.bosses.values():
+        d = PROJECTS / b["dir"]
+        files[d / "README.md"] = boss_readme(book, b)
+        files[d / "main.cpp"] = boss_stub(b)
+        if b["n"] == 5:
+            files[d / "tests" / "basics.in"] = "SET lang cpp\nGET lang\nGET missing\nINCR hits\nINCR hits\nCOUNT\nDEL lang\nDEL lang\nCOUNT\nQUIT\n"
+            files[d / "tests" / "basics.out"] = "OK\ncpp\n(nil)\n1\n2\n2\n1\n0\n1\n"
+    for s in book.side.values():
+        d = ROOT / s["dir"]
+        files[d / "notes.md"] = side_notes_template(s)
+        if s["key"] in ("dbg", "make"):
+            files[d / "lab" / ".gitkeep"] = ""
+    if book.side:
+        files[ROOT / "side_quests" / "README.md"] = side_index(book)
+    files[JOURNAL] = JOURNAL_TEMPLATE
+    files[ROOT / "cheatsheet.md"] = CHEATSHEET_TEMPLATE
+    files[ROOT / ".gitignore"] = GITIGNORE
+    return files
+
+
+_SCAFFOLD = None
+
+
+def stubs(book):
+    global _SCAFFOLD
+    if _SCAFFOLD is None:
+        _SCAFFOLD = scaffold(book)
+    return _SCAFFOLD
+
+
+STUB_HASHES = QDIR / "stubs.json"
+
+
+def sha(data):
+    return hashlib.sha1(data).hexdigest()
+
+
+def load_stub_hashes():
+    return json.loads(STUB_HASHES.read_text()) if STUB_HASHES.exists() else {}
+
+
+def untouched(book, path):
+    """True if the file/folder still holds exactly what `quest init` generated (by recorded hash or template)."""
+    rec, st = load_stub_hashes(), stubs(book)
+
+    def same(f):
+        data = f.read_bytes()
+        if not data.strip():
+            return True
+        return rec.get(rel(f)) == sha(data) or st.get(f, "").encode("utf-8") == data
+
+    if path.is_dir():
+        files = [f for f in path.rglob("*") if f.is_file() and f.name != ".DS_Store"]
+        return all(same(f) for f in files)
+    return path.exists() and same(path)
+
+
+def unit_name(book, ch):
+    if isinstance(ch, int):
+        return f"chapter {ch}"
+    return book.side[ch]["short"] if ch in book.side else str(ch)
+
+
+def notes_lines(book, c):
+    p = ROOT / c["dir"] / "notes.md"
+    if not p.exists():
+        return 0
+    tmpl = {ln.strip() for ln in (side_notes_template(c) if "key" in c else notes_template(c)).splitlines()}
+    n = 0
+    for ln in p.read_text(encoding="utf-8", errors="replace").splitlines():
+        s = ln.strip()
+        if s and s not in tmpl and s not in ("-", "Q:", "A:") and not s.startswith("<!--"):
+            n += 1
+    return n
+
+
+def add_scribe_events(book, save):
+    have = {e["ch"] for e in save["events"] if e["t"] == "scribe"}
+    for c in book.chapters:
+        if c["num"] not in have and notes_lines(book, c) >= SCRIBE_LINES:
+            save["events"].append({"t": "scribe", "ch": c["num"], "at": iso(now())})
+    for s in book.side.values():
+        if s["key"] not in have and notes_lines(book, s) >= SCRIBE_LINES:
+            save["events"].append({"t": "scribe", "ch": s["key"], "at": iso(now())})
+
+
+# ───────────────────────────── journal + PROGRESS.md ─────────────────────────────
+def journal_append(lines):
+    t = now()
+    text = JOURNAL.read_text(encoding="utf-8") if JOURNAL.exists() else JOURNAL_TEMPLATE
+    head = f"## {t:%Y-%m-%d} · {t:%A}"
+    heads = re.findall(r"^## \d{4}-\d{2}-\d{2}.*$", text, re.M)
+    if not text.endswith("\n"):
+        text += "\n"
+    if not heads or heads[-1].strip() != head:
+        text += f"\n{head}\n\n"
+        while lines and lines[0] == "":
+            lines = lines[1:]
+    text += "\n".join(lines) + "\n"
+    JOURNAL.write_text(text, encoding="utf-8")
+
+
+def heatmap(k, weeks=12):
+    today = now().date()
+    start = today - timedelta(days=today.weekday() + 7 * (weeks - 1))
+    rows = []
+    for wd, name in enumerate(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]):
+        cells = []
+        for w in range(weeks):
+            d = start + timedelta(days=7 * w + wd)
+            if d > today:
+                cells.append(" ")
+                continue
+            x = k.action_xp.get(d.isoformat(), 0)
+            cells.append("·" if x == 0 else "░" if x < k.goal / 2 else "▒" if x < k.goal else "▓" if x < 2 * k.goal else "█")
+        rows.append(f"{name} " + " ".join(cells))
+    return rows
+
+
+def render_progress(book, save, k):
+    pct = round(k.frac * 100)
+    lines = ["# 🎮 C++ Crash Course · Progress", "",
+             "> Auto-generated by `./quest` after every command. Don't edit by hand; your notes live in each chapter's `notes.md`.", "",
+             "| Level | XP | Next level | Streak | Best | Focus time | Badges |", "|---|---|---|---|---|---|---|",
+             f"| **Lv {k.level} · {title_for(k.level)}** | {fmt(k.xp)} | {fmt(k.hi - k.xp)} XP to Lv {k.level + 1} "
+             f"| 🔥 {k.streak} day{'s' if k.streak != 1 else ''} | {k.best} | {hm(k.minutes)} | {len(k.badges)}/{len(BADGES)} |", "",
+             f"**Book:** `{bar(k.frac, 30)}` {pct}% of required quests ({k.done_req}/{k.total_req})", ""]
+    if k.current is not None:
+        c = book.ch[k.current]
+        lines += [f"**Now playing:** Chapter {c['num']} · {c['title']}", ""]
+    lines += ["## 🗺️ Map", "", "| | Ch | Chapter | Reading | Exercises | Status |", "|---|---|---|---|---|---|"]
+    boss_after = {max(b["unlock"]): b for b in book.bosses.values()}
+    for c in book.chapters:
+        v = k.chap[c["num"]]
+        icon = "✅" if v.cleared else ("▶️" if c["num"] == k.current or v.started else "⬜")
+        status = f"Cleared {v.cleared_at[:10]}" if v.cleared else ("In progress" if v.started else ("Optional prologue" if c["optional"] else ""))
+        ex = f"{v.ex[0]}/{v.ex[1]}" + (f" (+{v.opt[0]}/{v.opt[1]} opt)" if v.opt[1] else "") if v.ex[1] or v.opt[1] else "—"
+        lines.append(f"| {icon} | {c['num']} | {c['title']} | {v.reading[0]}/{v.reading[1]} | {ex} | {status} |")
+        b = boss_after.get(c["num"])
+        if b:
+            lines.append(f"| {boss_icon(k, b)} | B{b['n']} | **Boss: {b['name']}** | | | {boss_state(k, b)} |")
+    if book.side:
+        lines += ["", "## 🗺️ Side quests (optional)", "", "| | Book | Reading | Labs | Status |", "|---|---|---|---|---|"]
+        for s in book.side.values():
+            v = k.side[s["key"]]
+            icon = "📗" if v.finished else ("▶️" if v.started else "⬜")
+            st = f"Finished {v.finished_at[:10]}" if v.finished else ("In progress" if v.started else f"+{s['xp']} XP when finished")
+            opt = f" (+{v.opt[0]}/{v.opt[1]} opt)" if v.opt[1] else ""
+            lines.append(f"| {icon} | [{s['short']}]({s['dir']}/notes.md) | {v.reading[0]}/{v.reading[1]}{opt} | {v.labs[0]}/{v.labs[1]} | {st} |")
+    lines += ["", "## 🏅 Badges", ""]
+    for bid, emo, name, desc, _ in BADGES:
+        if bid in k.badges:
+            lines.append(f"- {emo} **{name}** · {desc} · _{save['badge_dates'].get(bid, '')[:10]}_")
+    locked = [b for b in BADGES if b[0] not in k.badges]
+    if locked:
+        lines += ["", "<details><summary>Locked badges</summary>", ""]
+        lines += [f"- 🔒 {name} · {desc}" for _, _, name, desc, _ in locked]
+        lines += ["", "</details>"]
+    lines += ["", "## 📅 Last 12 weeks", "", "```"] + heatmap(k) + ["```",
+              f"`·` nothing · `░` < half goal · `▒` < goal · `▓` goal hit · `█` 2× goal (goal = {k.goal} XP)", ""]
+    by = defaultdict(int)
+    for _, xp, kind, _ in k.ledger:
+        by[kind] += xp
+    names = SOURCE_NAMES
+    lines += ["## 📈 Where your XP came from", "", "| Source | XP |", "|---|---|"]
+    lines += [f"| {names[kd]} | {fmt(v)} |" for kd, v in sorted(by.items(), key=lambda r: -r[1]) if v]
+    recent = [r for r in k.ledger if r[2] not in ("streak", "goal")][-12:]
+    lines += ["", "## 📜 Recent activity", ""]
+    lines += [f"- `{at[:16].replace('T', ' ')}` {label} (+{xp})" for at, xp, _, label in reversed(recent)] or ["- Nothing yet. Run `./quest start`."]
+    lines.append("")
+    text = "\n".join(lines)
+    if not PROGRESS.exists() or PROGRESS.read_text(encoding="utf-8") != text:
+        PROGRESS.write_text(text, encoding="utf-8")
+
+
+def boss_unlocked(k, b):
+    return all(k.chap[n].cleared for n in b["unlock"])
+
+
+def boss_icon(k, b):
+    return "💀" if b["n"] in k.boss else ("⚔️" if boss_unlocked(k, b) else "🔒")
+
+
+def boss_state(k, b):
+    if b["n"] in k.boss:
+        return f"Defeated {k.boss[b['n']][:10]}"
+    if boss_unlocked(k, b):
+        return "Ready to fight!"
+    return "Locked · clear ch " + ", ".join(str(n) for n in b["unlock"] if not k.chap[n].cleared)
+
+
+# ───────────────────────────── mutations + celebrations ─────────────────────────────
+def mutate(book, fn, quiet=False):
+    save = load_save()
+    before = compute(book, save)
+    fn(save)
+    add_scribe_events(book, save)
+    after = compute(book, save)
+    celebrate(book, save, before, after, quiet)
+    after = compute(book, save)  # badge dates may have changed
+    write_save(save)
+    render_progress(book, save, after)
+    return save, after
+
+
+def celebrate(book, save, a, b, quiet):
+    log = []
+    for n, v in b.chap.items():
+        if v.cleared and not a.chap[n].cleared:
+            c = book.ch[n]
+            print(f"\n  {B(GRN('🏁 CHAPTER ' + str(n) + ' CLEARED'))} · {c['title']}  {YEL('+' + str(XP_CHAPTER) + ' XP')}")
+            log.append(f"- 🏁 {now():%H:%M} · **Cleared chapter {n}: {c['title']}**")
+    for boss in book.bosses.values():
+        if boss_unlocked(b, boss) and not boss_unlocked(a, boss):
+            print(f"  {B(RED('🐉 BOSS UNLOCKED'))}: {boss['name']} → ./quest boss {boss['n']}")
+            log.append(f"- 🐉 {now():%H:%M} · Boss {boss['n']} unlocked: {boss['name']}")
+    for p in (1, 2):
+        if b.part_done[p] and not a.part_done[p]:
+            print(f"\n  {B(MAG('🏰 PART ' + str(p) + ' COMPLETE'))}  {YEL('+' + str(XP_PART[p]) + ' XP')}")
+            log.append(f"- 🏰 {now():%H:%M} · **Part {p} complete!**")
+    s_new = set(b.scribe) - set(a.scribe)
+    for ch in sorted(s_new, key=str):
+        print(f"  📜 Notes bonus for {unit_name(book, ch)}: your notes.md is filling up nicely. {YEL('+' + str(XP_SCRIBE) + ' XP')}")
+    for key, v in b.side.items():
+        if v.finished and not a.side[key].finished:
+            s = book.side[key]
+            print(f"\n  {B(GRN('📗 SIDE QUEST COMPLETE'))} · {s['title']}  {YEL('+' + str(s['xp']) + ' XP')}")
+            log.append(f"- 📗 {now():%H:%M} · **Finished side quest: {s['title']}**")
+    for bid in b.badges:
+        if bid not in a.badges or bid not in save["badge_dates"]:
+            if bid not in save["badge_dates"]:
+                save["badge_dates"][bid] = iso(now())
+                _, emo, name, desc, _ = BADGE_BY_ID[bid]
+                print(f"  {B(YEL('🏅 BADGE UNLOCKED'))}  {emo} {B(name)} · {desc}  {YEL('+' + str(XP_BADGE) + ' XP')}")
+                log.append(f"- 🏅 {now():%H:%M} · Badge unlocked: {emo} {name}")
+    for bid in list(save["badge_dates"]):
+        if bid not in b.badges:
+            del save["badge_dates"][bid]
+    lv_after = level_for(compute(book, save).xp)
+    if lv_after > a.level:
+        print()
+        print("  " + B(YEL("★ ★ ★   L E V E L   U P   ★ ★ ★")))
+        print(f"  {B('Lv ' + str(lv_after))} · {B(CYN(title_for(lv_after)))}")
+        log.append(f"- ⭐ {now():%H:%M} · **Level up → Lv {lv_after} {title_for(lv_after)}**")
+    if b.book_done and not a.book_done:
+        print("\n" + B(YEL("  🏆🏆🏆  YOU FINISHED C++ CRASH COURSE  🏆🏆🏆")))
+        log.append(f"- 🏆 {now():%H:%M} · **FINISHED THE BOOK**")
+    if log:
+        journal_append(log)
+
+
+# ───────────────────────────── building + running C++ ─────────────────────────────
+PREFIXES = [Path("/opt/homebrew"), Path("/usr/local")]
+
+
+def boost_available():
+    return any((p / "include" / "boost").is_dir() for p in PREFIXES)
+
+
+def build(sources, out_name, sanitize=None):
+    cxx = os.environ.get("CXX", "clang++")
+    if not shutil.which(cxx):
+        die(f"Compiler '{cxx}' not found. Install the Xcode command-line tools: xcode-select --install")
+    BUILD.mkdir(exist_ok=True)
+    out = BUILD / out_name
+    cmd = [cxx, "-std=c++20", "-Wall", "-Wextra", "-g"]
+    for p in PREFIXES:
+        if (p / "include").is_dir():
+            cmd += ["-isystem", str(p / "include")]
+        if (p / "lib").is_dir():
+            cmd += ["-L", str(p / "lib")]
+    if sanitize == "asan":
+        cmd += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer"]
+    elif sanitize == "tsan":
+        cmd += ["-fsanitize=thread"]
+    extra = []
+    for s in sources:
+        for m in re.finditer(r"//\s*quest-flags:\s*(.+)$", s.read_text(encoding="utf-8", errors="replace"), re.M):
+            extra += shlex.split(m.group(1))
+    srcs = [rel(s) for s in sources]           # relative paths → short, clickable diagnostics
+    cmd += srcs + extra + ["-o", rel(out)]
+    short = [cxx, "-std=c++20", "-Wall", "-Wextra", "-g"] + \
+            (["-fsanitize=" + ("address,undefined" if sanitize == "asan" else "thread")] if sanitize else []) + \
+            srcs + extra + ["-o", rel(out)]
+    print(DIM("  $ " + " ".join(shlex.quote(x) for x in (cmd if os.environ.get("QUEST_VERBOSE") else short))))
+    sys.stdout.flush()
+    p = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)
+    text = (p.stdout + p.stderr).rstrip()
+    warnings = len(re.findall(r"\bwarning:", text))
+    if text:
+        print(textwrap.indent(text, "  "))
+    if p.returncode != 0 and "boost/" in text and not boost_available():
+        print(YEL("  Boost isn't installed. Run: brew install boost"))
+    return p.returncode == 0, warnings, out
+
+
+def sources_in(path):
+    if path.is_dir():
+        return sorted(f for f in path.rglob("*.cpp") if "tests" not in f.relative_to(path).parts)
+    return [path] if path.exists() else []
+
+
+def resolve_target(book, target):
+    """→ (label, sources, out_name). target: exercise id, bossN, or a path to a .cpp/folder."""
+    if target in book.ex:
+        c, e = book.ex[target]
+        if not e["file"]:
+            die(f"{target} is a {e['kind']} task, not code. Mark it with: ./quest done {target}")
+        p = book.ex_path(c, e)
+        return f"exercise {target}", sources_in(p), p.stem if p.is_file() else p.name
+    m = re.fullmatch(r"(?:boss|b)(\d+)", target)
+    if m and int(m.group(1)) in book.bosses:
+        b = book.bosses[int(m.group(1))]
+        return f"boss {b['n']}", sources_in(book.boss_dir(b)), b["dir"]
+    for base in (Path.cwd(), ROOT):
+        p = (base / target)
+        if p.exists():
+            return rel(p), sources_in(p), p.stem if p.is_file() else p.name
+    die(f"Don't know '{target}'. Use an exercise id (2-1), boss3, or a path to a .cpp file / folder.")
+
+
+# ───────────────────────────── commands ─────────────────────────────
+def cmd_status(book, args):
+    save, k = mutate(book, lambda s: None)
+    header(book, save, k)
+    next_up(book, save, k)
+
+
+def header(book, save, k):
+    lv = k.level
+    print()
+    print("  " + B(MAG("⚔  C++ CRASH COURSE · QUEST LOG")))
+    print(f"  {B('Lv ' + str(lv))} · {B(CYN(title_for(lv)))}    {YEL(fmt(k.xp) + ' XP')}")
+    print(f"  {GRN(bar((k.xp - k.lo) / (k.hi - k.lo), 24))}  {fmt(k.xp - k.lo)}/{fmt(k.hi - k.lo)} to Lv {lv + 1} {DIM(title_for(lv + 1))}")
+    s = f"  🔥 Streak {B(str(k.streak))} day{'s' if k.streak != 1 else ''} · best {k.best}"
+    if k.freezes:
+        s += f" · ❄️ {k.freezes} freeze{'s' if k.freezes > 1 else ''} banked"
+    if k.at_risk:
+        s += YEL(" · study today to keep it alive!") if k.freeze_needed == 0 else YEL(f" · a freeze covers {k.freeze_needed} missed day(s); study today!")
+    print(s)
+    hit = k.today_xp >= k.goal
+    print(f"  🎯 Today {k.today_xp}/{k.goal} XP  {(GRN if hit else YEL)(bar(k.today_xp / k.goal, 12))}"
+          + (GRN(f"  goal hit! +{XP_DAILY_GOAL}") if hit else ""))
+    print(f"  📚 Book {round(k.frac * 100)}%  {CYN(bar(k.frac, 12))}  · 🏅 {len(k.badges)}/{len(BADGES)} badges · ⏱️ {hm(k.minutes)} focused")
+    print(f"  {DIM('last 14 days')} {GRN(spark(k.last14))}")
+
+
+def first_unread(book, k, ch=None):
+    chs = [ch] if ch is not None else range(1, 22)
+    for n in chs:
+        for q in book.ch[n]["reading"]:
+            if q["id"] not in k.read:
+                return book.ch[n], q
+    return None
+
+
+def next_read(book, save, k):
+    """Continue in the chapter you last read from; otherwise the earliest unread quest."""
+    last = [e for e in save["events"] if e["t"] == "read" and not is_side_id(e["id"])]
+    if last:
+        ch = int(last[-1]["id"].split(".")[0])
+        got = first_unread(book, k, ch)
+        if got:
+            return got
+    return first_unread(book, k)
+
+
+def next_up(book, save, k):
+    print()
+    if k.current is None:
+        print("  " + B(GRN("Every chapter is cleared.")) + " Finish the bosses, then do a victory lap with ./quest review.")
+    else:
+        c = book.ch[k.current]
+        v = k.chap[k.current]
+        print(f"  ▶ {B('Chapter ' + str(c['num']) + ' · ' + c['title'])}   "
+              f"reading {v.reading[0]}/{v.reading[1]} · exercises {v.ex[0]}/{v.ex[1]}")
+    print(f"  {B('Next up')}")
+    nr = next_read(book, save, k)
+    if nr:
+        c, q = nr
+        print(f"    📖 {q['id']}  {q['title']}  {DIM('p.' + str(q['page']) + '–' + str(q['end']))}  {YEL('+' + str(q['xp']))}")
+        print(DIM("       read it, jot notes in " + c["dir"] + "/notes.md, then: ./quest read"))
+    if k.current is not None:
+        c = book.ch[k.current]
+        todo = [e for e in Book.required_ex(c) if e["id"] not in k.exd]
+        if todo:
+            e = todo[0]
+            print(f"    ⚔️  {e['id']} {stars(e['stars'])} {e['title']}  {YEL('+' + str(Book.ex_xp(e)))}")
+            if e["file"]:
+                print(DIM(f"       {c['dir']}/exercises/{e['file']}  →  ./quest run {e['id']} · ./quest done {e['id']}"))
+            else:
+                print(DIM(f"       {e['task']}  →  ./quest done {e['id']} \"what I learned\""))
+            if k.chap[k.current].reading[0] < k.chap[k.current].reading[1]:
+                print(DIM("       (exercises sit at the end of the chapter; finishing the reading first helps)"))
+    for b in book.bosses.values():
+        if boss_unlocked(k, b) and b["n"] not in k.boss:
+            print(f"    🐉 {B(RED('Boss ' + str(b['n']) + ' · ' + b['name']))} is waiting → ./quest boss {b['n']}")
+    side_line(book, k)
+    cards = load_cards(book)
+    reviewed_today = any(e["t"] == "review" and e["at"][:10] == now().date().isoformat() for e in save["events"])
+    if cards and not reviewed_today:
+        print(f"    ♻️  {len(cards)} flashcards in your notes → ./quest review")
+    if save["session"]:
+        start = datetime.fromisoformat(save["session"]["start"])
+        mins = int((now() - start).total_seconds() // 60)
+        print(f"    ⏱️  Focus session running: {mins} min (since {start:%H:%M}) → ./quest stop \"what I did\"")
+    else:
+        print(DIM("    ⏱️  Starting a study block? ./quest start"))
+    if k.read == {} and k.exd == {}:
+        print(DIM("\n  New here? Read README.md first. Coming from C? Chapter 0 (./quest ch 0) is an optional prologue."))
+    print()
+
+
+def side_next(book, k, key, ch=None):
+    qs = [q for sc in book.side[key]["chapters"] if ch is None or sc["num"] == ch
+          for q in sc["reading"] if q["id"] not in k.read]
+    req = [q for q in qs if not q["optional"]]
+    return (req or qs or [None])[0]
+
+
+def side_line(book, k):
+    active = [s for s in book.side.values() if k.side[s["key"]].started and not k.side[s["key"]].finished]
+    if active:
+        s = max(active, key=lambda s: k.side[s["key"]].last)
+        q = side_next(book, k, s["key"])
+        if q:
+            print(f"    🗺️  {s['short']}: {q['id']} {q['title'][:48]}  {DIM(pages_of(q))}  {YEL('+' + str(q['xp']))}  → ./quest read {s['key']}")
+            return
+        lab = next((x for x in s["labs"] if x["id"] not in k.exd), None)
+        if lab:
+            print(f"    🧪 {s['short']} lab {lab['id']}: {lab['title']}  {YEL('+' + str(Book.ex_xp(lab)))}  → ./quest done {lab['id']} \"what happened\"")
+            return
+    if k.current is not None:
+        fits = sorted((s for s in book.side.values() if k.current in s["pairs"] and not k.side[s["key"]].started),
+                      key=lambda s: len(s["pairs"]))
+        if fits:
+            print(DIM(f"    🗺️  Optional side quest for this chapter: {fits[0]['short']} → ./quest side {fits[0]['key']}"))
+
+
+def parse_read_targets(book, save, k, args):
+    if not args:
+        nr = next_read(book, save, k)
+        if not nr:
+            die("Nothing left to read. Wow.")
+        return [nr[1]["id"]]
+    ids = []
+    for a in args:
+        a = a.lower()
+        m_all = re.fullmatch(r"(\d+)\.(all|\*)", a)
+        sm = re.fullmatch(r"([a-z]+)(?:\.(\d+))?(?:\.(all|\*))?", a)
+        if a in book.reading:
+            ids.append(a)
+        elif m_all and int(m_all.group(1)) in book.ch:
+            ids += [q["id"] for q in book.ch[int(m_all.group(1))]["reading"]]
+        elif a.isdigit() and int(a) in book.ch:
+            got = first_unread(book, k, int(a))
+            if not got:
+                print(DIM(f"  Chapter {a}: all reading done."))
+                continue
+            ids.append(got[1]["id"])
+        elif sm and sm.group(1) in book.side:
+            key, chn, every = sm.group(1), sm.group(2), sm.group(3)
+            s = book.side[key]
+            if chn is not None and int(chn) not in {sc["num"] for sc in s["chapters"]}:
+                die(f"{s['short']} has no chapter {chn}. See ./quest side {key}")
+            if every:
+                ids += [q["id"] for sc in s["chapters"] if chn is None or sc["num"] == int(chn) for q in sc["reading"]]
+            else:
+                q = side_next(book, k, key, int(chn) if chn is not None else None)
+                if not q:
+                    print(DIM(f"  {s['short']}: nothing left to read there."))
+                    continue
+                ids.append(q["id"])
+        else:
+            die(f"Unknown reading quest '{a}'. Examples: 2.3 · 2 (next in ch 2) · 2.all · dbg (next in a side book) · dbg.2.3")
+    return ids
+
+
+def cmd_read(book, args):
+    save0 = load_save()
+    k0 = compute(book, save0)
+    ids = parse_read_targets(book, save0, k0, args)
+
+    def fn(save):
+        for i in ids:
+            _, q = book.reading[i]
+            if i in k0.read:
+                print(DIM(f"  {i} already read ({k0.read[i][:10]})."))
+                continue
+            save["events"].append({"t": "read", "id": i, "at": iso(now())})
+            k0.read[i] = iso(now())
+            print(f"  📖 {GRN('✔')} {i} {q['title']}  {YEL('+' + str(q['xp']) + ' XP')}")
+
+    save, k = mutate(book, fn)
+    if ids and is_side_id(ids[-1]):
+        key = ids[-1].split(".")[0]
+        q = side_next(book, k, key)
+        if q:
+            print(DIM(f"  next in {book.side[key]['short']}: {q['id']} {q['title']} ({pages_of(q)})"))
+    else:
+        nr = next_read(book, save, k)
+        if nr:
+            print(DIM(f"  next: {nr[1]['id']} {nr[1]['title']} ({pages_of(nr[1])})"))
+    mini(k)
+
+
+def mini(k):
+    print(f"  {DIM('Lv')} {k.level} {DIM(title_for(k.level))} · {fmt(k.xp)} XP · {GRN(bar((k.xp - k.lo) / (k.hi - k.lo), 16))}"
+          f" · 🎯 {k.today_xp}/{k.goal} · 🔥 {k.streak}")
+
+
+def split_flags(args):
+    flags = {a for a in args if a in ("--asan", "--tsan", "--force")}
+    rest = [a for a in args if a not in flags]
+    return flags, rest
+
+
+def cmd_run(book, args):
+    if "--" in args:
+        i = args.index("--")
+        args, prog_args = args[:i], args[i + 1:]
+    else:
+        prog_args = []
+    flags, rest = split_flags(args)
+    if not rest:
+        die("Usage: ./quest run <exercise-id | bossN | path.cpp> [--asan|--tsan] [-- program args]")
+    label, srcs, name = resolve_target(book, rest[0])
+    if not srcs:
+        die(f"No .cpp files found for {label}. Run ./quest init to recreate stubs.")
+    san = "asan" if "--asan" in flags else "tsan" if "--tsan" in flags else None
+    ok, warns, out = build(srcs, name + ("-" + san if san else ""), san)
+    if not ok:
+        die("Build failed. Fix the first error, then try again (the first error usually causes the rest).")
+    print(GRN(f"  ✔ built") + (YEL(f" with {warns} warning(s)") if warns else DIM(" · 0 warnings")))
+    print(DIM("  ── program output " + "─" * 40))
+    sys.stdout.flush()
+    try:
+        r = subprocess.run([str(out)] + prog_args)
+        code = r.returncode
+    except KeyboardInterrupt:
+        code = 130
+    print(DIM("  " + "─" * 58))
+    print((GRN if code == 0 else YEL)(f"  exit code {code}"))
+
+
+def cmd_done(book, args):
+    flags, rest = split_flags(args)
+    if not rest:
+        die("Usage: ./quest done <id> [more ids] [\"note for your journal\"] [--asan] [--force]")
+    ids = [a for a in rest if a in book.ex]
+    notes = [a for a in rest if a not in book.ex]
+    if not ids:
+        die(f"Unknown exercise '{rest[0]}'. See ./quest ch <n> for ids.")
+    if any(re.fullmatch(r"(\d+|[a-z]+)-\d+", n) for n in notes):
+        die(f"Unknown exercise id among: {', '.join(notes)}")
+    note = " ".join(notes).strip()
+    save0 = load_save()
+    k0 = compute(book, save0)
+    results = []
+    built = {}
+    for i in ids:
+        c, e = book.ex[i]
+        prior = k0.exd.get(i)
+        if prior and (prior.get("clean") or e["kind"] != "code"):
+            print(DIM(f"  {i} is already complete ({prior['at'][:10]})."))
+            continue
+        clean = False
+        if e["kind"] == "code" and "--force" not in flags:
+            p = book.ex_path(c, e)
+            if not sources_in(p):
+                die(f"{rel(p)} is missing. Run ./quest init to recreate it.")
+            if untouched(book, p):
+                die(f"{rel(p)} is still empty. Write some code first!")
+            if p not in built:
+                print(f"  ⚔️  Checking {i}: {e['title']}")
+                built[p] = build(sources_in(p), p.stem if p.is_file() else p.name,
+                                 "asan" if "--asan" in flags else None)
+            ok, warns, _ = built[p]
+            if not ok:
+                die("It doesn't compile yet, so no XP. Fix the errors above and run ./quest done again.")
+            clean = warns == 0
+            if not clean:
+                print(YEL(f"  {warns} warning(s). Accepted, but fix them and re-run done for the +{XP_CLEAN} clean-build bonus."))
+        elif e["kind"] == "code":
+            print(YEL("  --force: skipping the compile check (no clean-build bonus)."))
+        if prior and e["kind"] == "code" and not prior.get("clean") and clean:
+            results.append(("upgrade", i, e))
+        elif not prior:
+            results.append(("new", i, e, clean))
+
+    def fn(save):
+        for r in results:
+            if r[0] == "upgrade":
+                for ev in save["events"]:
+                    if ev["t"] == "ex" and ev["id"] == r[1]:
+                        ev["clean"] = True
+                print(f"  ✨ {r[1]} now builds warning-free  {YEL('+' + str(XP_CLEAN) + ' XP')}")
+            else:
+                _, i, e, clean = r
+                save["events"].append({"t": "ex", "id": i, "at": iso(now()), "clean": clean})
+                xp = Book.ex_xp(e) + (XP_CLEAN if clean else 0)
+                extra = f" (incl. +{XP_CLEAN} clean build ✨)" if clean else ""
+                print(f"  {GRN('✔')} {i} {e['title']}  {YEL('+' + str(xp) + ' XP')}{DIM(extra)}")
+        if note and results:
+            journal_append([f"- ⚔️ {now():%H:%M} · {', '.join(r[1] for r in results)}: {note}"])
+
+    save, k = mutate(book, fn)
+    main_ids = [i for i in ids if not is_side_id(i)]
+    if main_ids:
+        c = book.ch[int(main_ids[-1].split("-")[0])]
+        left = [e for e in Book.required_ex(c) if e["id"] not in k.exd]
+        if left:
+            print(DIM(f"  next in chapter {c['num']}: {left[0]['id']} {left[0]['title']}"))
+    mini(k)
+
+
+def boss_hp(b):
+    readme = book_boss_readme(b)
+    if not readme.exists():
+        return 0, len(b["goals"])
+    text = readme.read_text(encoding="utf-8")
+    sec = re.split(r"^## ", text, flags=re.M)
+    win = next((s for s in sec if s.lower().startswith("win conditions")), "")
+    ticks = re.findall(r"^\s*[-*]\s*\[([ xX])\]", win, re.M)
+    return sum(1 for t in ticks if t.lower() == "x"), len(ticks)
+
+
+def book_boss_readme(b):
+    return PROJECTS / b["dir"] / "README.md"
+
+
+def cmd_boss(book, args):
+    save = load_save()
+    k = compute(book, save)
+    if not args:
+        print()
+        for b in book.bosses.values():
+            done, total = boss_hp(b)
+            print(f"  {boss_icon(k, b)}  Boss {b['n']} · {B(b['name']):<28} {DIM(boss_state(k, b))}  "
+                  f"{YEL(str(b['xp']) + ' XP')}  {DIM('win conditions ' + str(done) + '/' + str(total))}")
+        print(DIM("\n  ./quest boss <n> to fight · specs in projects/<boss>/README.md\n"))
+        return
+    try:
+        b = book.bosses[int(args[0].lstrip("bB").replace("oss", ""))]
+    except (ValueError, KeyError):
+        die("Usage: ./quest boss <1-8>")
+    d = book.boss_dir(b)
+    print(f"\n  🐉 {B(RED('Boss ' + str(b['n']) + ' · ' + b['name']))}   reward {YEL(str(b['xp']) + ' XP')}")
+    print(wrap(b["pitch"], "     "))
+    if b["n"] in k.boss:
+        print(GRN(f"\n  💀 Already defeated on {k.boss[b['n']][:10]}. Glory is eternal.\n"))
+        return
+    if not boss_unlocked(k, b):
+        need = [n for n in b["unlock"] if not k.chap[n].cleared]
+        print(YEL(f"\n  🔒 Locked. Clear chapter{'s' if len(need) > 1 else ''} {', '.join(map(str, need))} first.\n"))
+        return
+    done, total = boss_hp(b)
+    hp = total - done
+    print(f"\n  Boss HP  {RED(bar(hp / total if total else 1, 24))}  {hp}/{total}   (tick win conditions in {rel(book_boss_readme(b))})")
+    srcs = sources_in(d)
+    if not srcs:
+        die(f"No .cpp files in {rel(d)}.")
+    if untouched(book, d / "main.cpp") and len(srcs) == 1:
+        die("main.cpp is still empty. Read the README, plan, and start coding!")
+    if b["build"] == "boost" and not boost_available():
+        die("This boss needs Boost: brew install boost")
+    san = {"sanitize": "asan", "tsan": "tsan"}.get(b["build"])
+    print(f"\n  ⚔️  Attack 1: build{(' with ' + san.upper()) if san else ''}")
+    ok, warns, out = build(srcs, b["dir"] + ("-" + san if san else ""), san)
+    if not ok:
+        die("The boss shrugs off your attack: the build failed.")
+    print(GRN("  ✔ hit!") + (YEL(f" ({warns} warnings)") if warns else ""))
+    passed = True
+    if b["n"] == 5:
+        tests = sorted((d / "tests").glob("*.in"))
+        print(f"\n  ⚔️  Attack 2: {len(tests)} test script(s)")
+        for t in tests:
+            exp = t.with_suffix(".out")
+            if not exp.exists():
+                print(YEL(f"    ? {t.name}: no {exp.name}, skipped"))
+                continue
+            try:
+                r = subprocess.run([str(out)], stdin=t.open(), capture_output=True, text=True, timeout=30)
+            except subprocess.TimeoutExpired:
+                print(RED(f"    ✗ {t.name}: timed out (does QUIT exit?)"))
+                passed = False
+                continue
+            norm = lambda s: "\n".join(ln.rstrip() for ln in s.strip().splitlines())
+            if norm(r.stdout) == norm(exp.read_text()):
+                print(GRN(f"    ✔ {t.name}"))
+            else:
+                passed = False
+                print(RED(f"    ✗ {t.name}"))
+                diff = difflib.unified_diff(norm(exp.read_text()).splitlines(), norm(r.stdout).splitlines(),
+                                            "expected", "yours", lineterm="")
+                for ln in list(diff)[:20]:
+                    print("      " + ln)
+        if len(tests) < 3:
+            print(YEL(f"    Only {len(tests)} test pair(s); the spec asks for at least 3."))
+    elif b["build"] in ("sanitize", "tsan") and b["n"] != 7:
+        print(f"\n  ⚔️  Attack 2: self-test  ./{b['dir']} {' '.join(b['args'])}")
+        sys.stdout.flush()
+        try:
+            code = subprocess.run([str(out)] + b["args"], timeout=120).returncode
+        except subprocess.TimeoutExpired:
+            code = "timeout (120 s)"
+        passed = code == 0
+        print(GRN("  ✔ hit!") if passed else RED(f"  ✗ missed: exit code {code}"))
+    if not passed:
+        die("The boss is still standing. Fix the failures above and attack again.")
+    if done < total or total == 0:
+        print(YEL(f"\n  The build holds, but the boss still has {hp} HP."))
+        print(DIM(f"  Tick each win condition in {rel(book_boss_readme(b))} as you finish it, then attack again."))
+        return
+
+    def fn(s):
+        s["events"].append({"t": "boss", "n": b["n"], "at": iso(now())})
+        journal_append([f"- 🐉 {now():%H:%M} · **Defeated Boss {b['n']}: {b['name']}**"])
+
+    print("\n" + B(RED("   ☠  ☠  ☠   B O S S   D E F E A T E D   ☠  ☠  ☠")))
+    print(f"   {b['name']} falls.  {YEL('+' + str(b['xp']) + ' XP')}\n")
+    _, k2 = mutate(book, fn)
+    mini(k2)
+
+
+def cmd_start(book, args):
+    def fn(save):
+        if save["session"]:
+            st = datetime.fromisoformat(save["session"]["start"])
+            print(YEL(f"  A session is already running since {st:%a %H:%M} ({int((now() - st).total_seconds() // 60)} min)."))
+            print(DIM("  Stop it with ./quest stop (or ./quest stop -m 45 if you forgot to stop it)."))
+            return
+        save["session"] = {"start": iso(now())}
+        print(f"  ⏱️  Focus session started at {now():%H:%M}. Phone away. "
+              f"+1 XP per minute (min {SESSION_MIN}, max {SESSION_CAP_XP}).")
+    _, k = mutate(book, fn)
+    nr = next_read(book, load_save(), k)
+    if nr:
+        print(DIM(f"  Suggested: {nr[1]['id']} {nr[1]['title']} (p.{nr[1]['page']}–{nr[1]['end']})"))
+
+
+def cmd_stop(book, args):
+    mins_override = None
+    if "-m" in args:
+        i = args.index("-m")
+        try:
+            mins_override = int(args[i + 1])
+        except (IndexError, ValueError):
+            die("Usage: ./quest stop [-m minutes] [\"note\"]")
+        args = args[:i] + args[i + 2:]
+    note = " ".join(args).strip()
+
+    def fn(save):
+        if not save["session"]:
+            die("No session running. Start one with ./quest start")
+        st = datetime.fromisoformat(save["session"]["start"])
+        end = now()
+        mins = mins_override if mins_override is not None else int((end - st).total_seconds() // 60)
+        if mins > SESSION_CAP_MIN:
+            print(YEL(f"  That's {mins} min; did you forget to stop? Capped at {SESSION_CAP_MIN}. Use -m N to set it exactly."))
+            mins = SESSION_CAP_MIN
+        save["session"] = None
+        save["events"].append({"t": "session", "start": iso(st), "min": mins, "at": iso(end)})
+        during = [e for e in save["events"] if iso(st) <= e["at"] <= iso(end) and e["t"] in ("read", "ex", "boss", "review")]
+        reads = [e["id"] for e in during if e["t"] == "read"]
+        exs = [e["id"] for e in during if e["t"] == "ex"]
+        lines = [f"### ⏱️ {st:%H:%M}–{end:%H:%M} · {mins} min focus session"]
+        if reads:
+            lines.append("- 📖 Read " + ", ".join(f"{i} {book.reading[i][1]['title']}" for i in reads))
+        if exs:
+            lines.append("- ⚔️ Completed " + ", ".join(f"{i} {book.ex[i][1]['title']}" for i in exs))
+        for e in during:
+            if e["t"] == "boss":
+                lines.append(f"- 🐉 Defeated boss {e['n']}")
+            if e["t"] == "review":
+                lines.append(f"- ♻️ Reviewed {e['n']} flashcards ({e['ok']} ✓)")
+        if note:
+            lines.append(f"- 💬 {note}")
+        journal_append(["", *lines, ""])
+        xp = min(SESSION_CAP_XP, mins) if mins >= SESSION_MIN else 0
+        print(f"  ⏱️  {mins} min logged  {YEL('+' + str(xp) + ' XP') if xp else DIM('(sessions under ' + str(SESSION_MIN) + ' min earn no XP)')}"
+              f"  · summary written to journal.md")
+        if not note:
+            print(DIM("  Tip: ./quest stop \"what clicked today\" adds a note to the journal."))
+    _, k = mutate(book, fn)
+    mini(k)
+
+
+def cmd_log(book, args):
+    text = " ".join(args).strip()
+    if not text:
+        die('Usage: ./quest log "what you learned / what confused you"')
+    journal_append([f"- 📝 {now():%H:%M} · {text}"])
+    print(f"  📝 Logged to journal.md")
+
+
+def load_cards(book, only=None):
+    cards = []
+    units = [(c["num"], c) for c in book.chapters] + [(s["key"], s) for s in book.side.values()]
+    for tag, c in units:
+        if only is not None and tag != only:
+            continue
+        p = ROOT / c["dir"] / "notes.md"
+        if not p.exists():
+            continue
+        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+        i = 0
+        while i < len(lines):
+            m = re.match(r"^\s*Q:\s*(.*\S)\s*$", lines[i])
+            if not m:
+                i += 1
+                continue
+            q, ans, j = m.group(1), [], i + 1
+            while j < len(lines):
+                ln = lines[j]
+                if re.match(r"^\s*Q:", ln) or ln.startswith("#"):
+                    break
+                ma = re.match(r"^\s*A:\s*(.*)$", ln)
+                if not ans and ma:
+                    ans.append(ma.group(1))
+                elif ans and ln.strip():
+                    ans.append(ln)
+                elif ans and not ln.strip():
+                    break
+                j += 1
+            a = "\n".join(ans).strip()
+            if a:
+                cards.append({"id": hashlib.sha1(q.encode()).hexdigest()[:10], "q": q, "a": a, "ch": tag})
+            i = j
+    return cards
+
+
+def cmd_review(book, args):
+    n, only = 5, None
+    for a in args:
+        if a.startswith("ch") and a[2:].isdigit():
+            only = int(a[2:])
+        elif a in book.side:
+            only = a
+        elif a.isdigit():
+            n = int(a)
+    cards = load_cards(book, only)
+    if not cards:
+        die("No flashcards yet. Add them under '## 🃏 Flashcards' in any chapter's notes.md:\n"
+            "    Q: What does RAII stand for?\n    A: Resource Acquisition Is Initialization")
+    save = load_save()
+    stats = save["cards"]
+    today = now().date()
+
+    def weight(cd):
+        s = stats.get(cd["id"])
+        if not s:
+            return 3.0
+        age = (today - date.fromisoformat(s["last"])).days
+        return max(0.3, 1 + 2 * s["miss"] - 0.5 * s["ok"]) + age / 7
+
+    pool, picks = cards[:], []
+    while pool and len(picks) < n:
+        cd = random.choices(pool, weights=[weight(x) for x in pool])[0]
+        picks.append(cd)
+        pool.remove(cd)
+    print(f"\n  ♻️  Flashcard review: {len(picks)} of {len(cards)} cards. Answer in your head, then reveal.\n")
+    ok = seen = 0
+    results = {}
+    try:
+        for idx, cd in enumerate(picks, 1):
+            tag = f"ch {cd['ch']}" if isinstance(cd["ch"], int) else cd["ch"]
+            print(f"  {CYN('Q' + str(idx))} {DIM('[' + tag + ']')} {B(cd['q'])}")
+            input(DIM("     ↵ reveal "))
+            print(textwrap.indent(cd["a"], "     " + GRN("A ")))
+            got = input("     got it? [y/n] ").strip().lower().startswith("y")
+            results[cd["id"]] = got
+            seen += 1
+            ok += got
+            print()
+    except (EOFError, KeyboardInterrupt):
+        print(DIM("\n  (review stopped early)"))
+    if not seen:
+        return
+
+    def fn(save):
+        for cid, got in results.items():
+            s = save["cards"].setdefault(cid, {"ok": 0, "miss": 0, "last": today.isoformat()})
+            s["ok" if got else "miss"] += 1
+            s["last"] = today.isoformat()
+        save["events"].append({"t": "review", "n": seen, "ok": ok, "at": iso(now())})
+    _, k = mutate(book, fn)
+    print(f"  {ok}/{seen} correct  {YEL('+' + str(min(REVIEW_CAP, REVIEW_XP * ok)) + ' XP')} {DIM('(max ' + str(REVIEW_CAP) + ' XP/day from reviews)')}")
+    mini(k)
+
+
+def cmd_side(book, args):
+    save, k = mutate(book, lambda s: None)
+    if not book.side:
+        die("No side quests configured.")
+    if not args:
+        print(f"\n  {B('🗺️  Side quests')}  {DIM('optional books: XP + streak days, never required')}\n")
+        for s in book.side.values():
+            v = k.side[s["key"]]
+            tot, got = v.reading[1] + v.labs[1], v.reading[0] + v.labs[0]
+            icon = GRN("✔") if v.finished else (CYN("◐") if v.started else DIM("·"))
+            print(f"   {icon} {B(s['key']):<5} {s['title'][:50]:<50} {(GRN if v.finished else CYN)(bar(got / tot if tot else 0, 12))} "
+                  f"{DIM(str(v.reading[0]) + '/' + str(v.reading[1]) + ' read · ' + str(v.labs[0]) + '/' + str(v.labs[1]) + ' labs')}  {YEL('+' + str(s['xp']))}")
+            print(DIM(wrap("pairs with: " + s["pairs_text"], "          ")))
+        print(DIM("\n  ./quest side <key> for details · ./quest read <key> reads its next quest · ./quest pdf <key> opens it\n"))
+        return
+    key = args[0].lower()
+    if key not in book.side:
+        die(f"Unknown side book '{args[0]}'. Try: {', '.join(book.side)}")
+    s, v = book.side[key], k.side[key]
+    print(f"\n  🗺️  {B(s['title'])}  {DIM(s['author'])}" + (GRN("  📗 finished " + v.finished_at[:10]) if v.finished else ""))
+    nl = notes_lines(book, s)
+    print(DIM(f"  notes: {s['dir']}/notes.md · {nl} line(s) written" +
+              (" · 📜 bonus earned" if key in k.scribe else f" · {max(0, SCRIBE_LINES - nl)} more for the 📜 notes bonus")))
+    print(DIM(wrap("heads-up: " + s["note"], "  ")))
+    print(f"  {B('📖 Reading')} {v.reading[0]}/{v.reading[1]}" + (DIM(f" (+{v.opt[0]}/{v.opt[1]} optional)") if v.opt[1] else "")
+          + f" · {B('🧪 Labs')} {v.labs[0]}/{v.labs[1]} · finish for {YEL('+' + str(s['xp']) + ' XP')}")
+    for sc in s["chapters"]:
+        print(f"\n  {B('Ch ' + str(sc['num']) + ' · ' + sc['title'])}" + (DIM("  (optional)") if sc.get("optional") else ""))
+        for q in sc["reading"]:
+            mark = GRN("✔") if q["id"] in k.read else DIM("·")
+            opt = DIM(" opt") if q["optional"] and not sc.get("optional") else ""
+            print(f"   {mark} {q['id']:<10} {q['title'][:56]:<56} {DIM(pages_of(q)):>11}  {YEL('+' + str(q['xp']))}{opt}")
+    print(f"\n  {B('🧪 Labs')}  {DIM('claim with ./quest done <id> \"what happened\"')}")
+    for lab in s["labs"]:
+        mark = GRN("✔") if lab["id"] in k.exd else DIM("·")
+        print(f"   {mark} {lab['id']:<7}{stars(lab['stars'])} {lab['title']:<38} {YEL('+' + str(Book.ex_xp(lab)))}")
+        print(DIM(wrap(lab["task"], "               ")))
+    print()
+
+
+def cmd_ch(book, args):
+    save = load_save()
+    k = compute(book, save)
+    if not args:
+        n = k.current if k.current is not None else 21
+    elif args[0].isdigit() and int(args[0]) in book.ch:
+        n = int(args[0])
+    else:
+        die("Usage: ./quest ch <0-21>")
+    c, v = book.ch[n], k.chap[n]
+    print(f"\n  {B('Chapter ' + str(n) + ' · ' + c['title'])}  {DIM('p.' + str(c['start']) + '–' + str(c['end']))}"
+          + (GRN("  ✅ cleared " + v.cleared_at[:10]) if v.cleared else ""))
+    nl = notes_lines(book, c)
+    print(DIM(f"  notes: {c['dir']}/notes.md · {nl} line(s) written" +
+              (" · 📜 bonus earned" if n in k.scribe else f" · {max(0, SCRIBE_LINES - nl)} more for the 📜 notes bonus")))
+    print(f"\n  {B('📖 Reading')}  {v.reading[0]}/{v.reading[1]}")
+    for q in c["reading"]:
+        mark = GRN("✔") if q["id"] in k.read else DIM("·")
+        print(f"   {mark} {q['id']:<6} {q['title'][:58]:<58} {DIM('p.' + str(q['page']) + '–' + str(q['end'])):>9}  {YEL('+' + str(q['xp']))}")
+    if c["exercises"]:
+        print(f"\n  {B('⚔️  Exercises')}  {v.ex[0]}/{v.ex[1]}" + (DIM(f" · book p.{c['ex_page']}") if c.get("ex_page") else ""))
+        for e in c["exercises"]:
+            d = k.exd.get(e["id"])
+            mark = GRN("✔") if d else DIM("·")
+            tags = (" ✨" if d and d.get("clean") else "") + (DIM(" opt") if e["optional"] else "") + \
+                   (DIM(" bonus") if e["bonus"] else "") + (DIM(" boost") if e["boost"] else "")
+            what = e["file"] if e["file"] else f"({e['kind']})"
+            print(f"   {mark} {e['id']:<6}{stars(e['stars'])} {e['title'][:34]:<34} {DIM(what[:32]):<32} {YEL('+' + str(Book.ex_xp(e)))}{tags}")
+            print(DIM(wrap(e["task"], "              ")))
+    for b in book.bosses.values():
+        if n == max(b["unlock"]):
+            print(f"\n  {boss_icon(k, b)} Boss {b['n']} · {b['name']}: {DIM(boss_state(k, b))}")
+    for s in book.side.values():
+        if n in s["pairs"] and len(s["pairs"]) < 10:
+            print(DIM(f"  🗺️  Optional side quest that pairs with this chapter: {s['short']} → ./quest side {s['key']}"))
+    print()
+
+
+def cmd_map(book, args):
+    save, k = mutate(book, lambda s: None)
+    boss_after = {max(b["unlock"]): b for b in book.bosses.values()}
+    print()
+    for part, label in ((0, "PROLOGUE (optional)"), (1, "PART I · The C++ Core Language"), (2, "PART II · C++ Libraries and Frameworks")):
+        print("  " + B(MAG(label)))
+        for c in [c for c in book.chapters if c["part"] == part]:
+            v = k.chap[c["num"]]
+            tot = v.reading[1] + v.ex[1]
+            got = v.reading[0] + v.ex[0]
+            icon = GRN("✔") if v.cleared else (YEL("▶") if c["num"] == k.current else (CYN("◐") if v.started else DIM("·")))
+            print(f"   {icon} {c['num']:>2} {c['title'][:36]:<36} {(GRN if v.cleared else CYN)(bar(got / tot if tot else 0, 14))} "
+                  f"{DIM(str(v.reading[0]) + '/' + str(v.reading[1]) + ' read · ' + str(v.ex[0]) + '/' + str(v.ex[1]) + ' ex')}")
+            b = boss_after.get(c["num"])
+            if b:
+                print(f"     {boss_icon(k, b)} {RED('Boss ' + str(b['n']))} {b['name']:<28} {DIM(boss_state(k, b))}")
+        print()
+    if book.side:
+        print("  " + B(MAG("SIDE QUESTS (optional)")))
+        for s in book.side.values():
+            v = k.side[s["key"]]
+            tot, got = v.reading[1] + v.labs[1], v.reading[0] + v.labs[0]
+            icon = GRN("✔") if v.finished else (CYN("◐") if v.started else DIM("·"))
+            print(f"   {icon} {s['key']:>4} {s['short'][:33]:<33} {(GRN if v.finished else CYN)(bar(got / tot if tot else 0, 14))} "
+                  f"{DIM(str(v.reading[0]) + '/' + str(v.reading[1]) + ' read · ' + str(v.labs[0]) + '/' + str(v.labs[1]) + ' labs')}")
+        print()
+    mini(k)
+    print()
+
+
+def cmd_badges(book, args):
+    save, k = mutate(book, lambda s: None)
+    print(f"\n  🏅 {len(k.badges)}/{len(BADGES)} badges  (+{XP_BADGE} XP each)\n")
+    for bid, emo, name, desc, _ in BADGES:
+        if bid in k.badges:
+            print(f"   {emo}  {B(name):<26} {desc}  {DIM(save['badge_dates'].get(bid, '')[:10])}")
+    for bid, emo, name, desc, _ in BADGES:
+        if bid not in k.badges:
+            print(DIM(f"   🔒  {name:<26} {desc}"))
+    print()
+
+
+def cmd_stats(book, args):
+    save, k = mutate(book, lambda s: None)
+    by = defaultdict(int)
+    for _, xp, kind, _ in k.ledger:
+        by[kind] += xp
+    print(f"\n  {B('XP by source')}  (total {fmt(k.xp)})")
+    for kd, v in sorted(by.items(), key=lambda r: -r[1]):
+        if v:
+            print(f"   {SOURCE_NAMES[kd]:<20} {fmt(v):>7}  {CYN(bar(v / k.xp if k.xp else 0, 20))}")
+    print(f"\n  {B('Last 12 weeks')}  (· none ░ <½ goal ▒ <goal ▓ goal █ 2× goal)")
+    for row in heatmap(k):
+        print("   " + GRN(row))
+    days = len(k.action_xp)
+    print(f"\n  active days {days} · sessions {len(k.sessions)} · focus {hm(k.minutes)} · flashcards ✓ {k.cards_ok}")
+    print(f"  required quests {k.done_req}/{k.total_req} · bosses {len(k.boss)}/{k.n_bosses}\n")
+
+
+def cmd_undo(book, args):
+    target = args[0] if args else None
+
+    def fn(save):
+        ev = save["events"]
+        for i in range(len(ev) - 1, -1, -1):
+            e = ev[i]
+            if e["t"] == "scribe":
+                continue
+            if target is None or e.get("id") == target or (target.lower().startswith("boss") and str(e.get("n")) == target[4:]):
+                ev.pop(i)
+                what = e.get("id") or (f"boss {e['n']}" if e["t"] == "boss" else e["t"])
+                print(f"  ↩️  Undid {e['t']} · {what} ({e['at'][:16].replace('T', ' ')})")
+                return
+        print(DIM("  Nothing to undo."))
+    _, k = mutate(book, fn)
+    mini(k)
+
+
+def cmd_goal(book, args):
+    if not args or not args[0].isdigit() or int(args[0]) < 10:
+        die("Usage: ./quest goal <xp per day, at least 10>   (default 100)")
+
+    def fn(save):
+        save["settings"]["daily_goal"] = int(args[0])
+        print(f"  🎯 Daily goal set to {args[0]} XP.")
+    mutate(book, fn)
+
+
+def cmd_init(book, args):
+    created = 0
+    rec = load_stub_hashes()
+    for path, content in scaffold(book).items():
+        if path.exists():
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        if path.suffix in (".cpp", ".h", ".hpp"):
+            rec[rel(path)] = sha(content.encode("utf-8"))
+        created += 1
+    QDIR.mkdir(exist_ok=True)
+    STUB_HASHES.write_text(json.dumps(rec, indent=1, sort_keys=True) + "\n")
+    save, k = mutate(book, lambda s: None)
+    print(f"  🧱 {created} file(s) created (existing files are never touched).")
+    print(f"  Run {B('./quest')} to see your dashboard.")
+
+
+def cmd_pdf(book, args):
+    key = args[0].split(".")[0].lower() if args else None
+    p = book.side_pdf(book.side[key]) if key in book.side else book.pdf()
+    if not p:
+        die("No PDF found in this folder.")
+    opener = "open" if sys.platform == "darwin" else "xdg-open"
+    subprocess.run([opener, str(p)])
+    if args and args[0] in book.reading:
+        q = book.reading[args[0]][1]
+        print(f"  Jump to page {q['page']} (⌥⌘G in Preview).")
+    elif key in book.side:
+        q = side_next(book, compute(book, load_save()), key)
+        if q:
+            print(f"  Next quest {q['id']} starts on page {q['page']} (⌥⌘G in Preview).")
+
+
+HELP = f"""
+  {B('quest')}: your C++ Crash Course progress, as a game
+
+  {B('Daily loop')}
+    ./quest                      dashboard: level, streak, today's goal, next steps
+    ./quest start                start a focus timer (+1 XP/min, {SESSION_MIN}–{SESSION_CAP_XP})
+    ./quest read [2.3 | 2 | 2.all]  mark reading done (no arg = the next one)
+    ./quest run 2-1 [--asan] [-- args]   compile + run an exercise (or bossN, or any .cpp path)
+    ./quest done 2-1 ["note"]    compile-check and claim an exercise (0 warnings = +{XP_CLEAN} bonus)
+    ./quest stop ["note"]        end the timer; writes a session summary to journal.md
+    ./quest review [n] [ch3]     flashcards from your notes.md files
+
+  {B('Look around')}
+    ./quest map                  every chapter + boss
+    ./quest ch [n]               one chapter: reading quests, exercises, files
+    ./quest boss [n]             list bosses / fight one
+    ./quest badges · stats       achievements · XP breakdown + 12-week heatmap
+    ./quest pdf                  open the book
+
+  {B('Side quests')}  (optional books: XP + streak days, never required)
+    ./quest side [key]           list side books / one book's quests and labs
+    ./quest read dbg | dbg.2 | dbg.2.3   next quest in a side book / chapter / a specific one
+    ./quest done dbg-1 ["note"]  claim a side lab
+    ./quest pdf dbg              open a side book
+
+  {B('Housekeeping')}
+    ./quest log "text"           add a line to journal.md
+    ./quest undo [id]            undo the last action (or the last one for an id)
+    ./quest goal 150             change the daily XP goal (default {DEFAULT_GOAL})
+    ./quest init                 recreate any missing folders/stubs (never overwrites)
+
+  Flags: --asan (AddressSanitizer+UBSan), --tsan (ThreadSanitizer), --force (skip compile check)
+  Source files can add compiler flags with a line like:  // quest-flags: -lboost_program_options
+"""
+
+
+def cmd_help(book, args):
+    print(HELP)
+
+
+COMMANDS = {
+    "status": cmd_status, "s": cmd_status, "next": cmd_status,
+    "read": cmd_read, "r": cmd_read,
+    "run": cmd_run, "done": cmd_done, "d": cmd_done,
+    "boss": cmd_boss, "start": cmd_start, "stop": cmd_stop, "log": cmd_log,
+    "review": cmd_review, "ch": cmd_ch, "chapter": cmd_ch, "map": cmd_map,
+    "badges": cmd_badges, "stats": cmd_stats, "undo": cmd_undo, "goal": cmd_goal,
+    "init": cmd_init, "pdf": cmd_pdf, "side": cmd_side, "help": cmd_help, "-h": cmd_help, "--help": cmd_help,
+}
+
+
+def main():
+    args = sys.argv[1:]
+    cmd = args[0] if args else "status"
+    if cmd not in COMMANDS:
+        print(RED(f"  Unknown command '{cmd}'."))
+        cmd_help(None, [])
+        sys.exit(1)
+    book = Book()
+    COMMANDS[cmd](book, args[1:])
+
+
+if __name__ == "__main__":
+    main()
