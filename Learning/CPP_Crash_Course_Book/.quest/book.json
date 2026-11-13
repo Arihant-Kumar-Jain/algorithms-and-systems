@@ -2507,7 +2507,7 @@
     19
    ],
    "pairs_text": "Chapter 1 (Debugging), then any time an exercise crashes. Chapter 5 of this book pairs with Crash Course chapter 19 (threads)",
-   "note": "The book uses GDB, but GDB doesn't run on Apple-silicon Macs. Use LLDB (`lldb .build/<name>`) with the GDB→LLDB command map: https://lldb.llvm.org/use/map.html . DDD and Eclipse are optional; skim those parts. Chapter 8 (other languages) is optional.",
+   "note": "The book uses GDB. GDB doesn't run natively on Apple-silicon Macs, but it works in this folder's Linux container (see README: 🐧 Linux toolbox), which also has Valgrind and strace for chapter 7. On the Mac itself, use LLDB (`lldb .build/<name>`) with the GDB→LLDB command map: https://lldb.llvm.org/use/map.html . DDD and Eclipse are optional; skim those parts. Chapter 8 (other languages) is optional.",
    "chapters": [
     {
      "num": 1,
@@ -3082,7 +3082,7 @@
     21
    ],
    "pairs_text": "Chapter 8 (translation units and headers) and chapter 21 (Special Topics in Compilation)",
-   "note": "macOS ships GNU Make 3.81 as `make`. For 4.x features install `brew install make` and run it as `gmake`. Chapter 6 (the GMSL library) is optional.",
+   "note": "macOS ships GNU Make 3.81 as `make`. The Linux container has GNU Make 4.3, which this book's 4.x features need (or `brew install make` and run `gmake` on the Mac). Chapter 6 (the GMSL library) is optional.",
    "chapters": [
     {
      "num": 1,

@@ -195,11 +195,57 @@ A source file can add its own flags with a comment line, for example to link a B
 
 ---
 
+## 🐧 Linux toolbox (GCC, GDB, Valgrind, strace)
+
+Most C++ teams build, debug and ship on Linux, so this folder includes a Linux container with the tools you'll
+meet at work. It runs natively on Apple silicon (no emulation) and shares this folder with your Mac, so your
+code, notes and quest progress are the same in both.
+
+| Tool | What it's for | Where it comes up |
+|---|---|---|
+| `g++` 13 (GCC) | the default Linux compiler; a second opinion next to Apple clang | everything |
+| `gdb` | the standard Linux debugger | Ch 1 Debugging, *Art of Debugging* side quest |
+| `valgrind` | finds leaks and invalid memory access | Ch 4, Ch 11, *Art of Debugging* ch 7 |
+| `strace` / `ltrace` | watch the system and library calls a program makes | *Art of Debugging* ch 7, Ch 17, Ch 20 |
+| GNU Make 4.3, CMake, Ninja | build systems | *GNU Make* side quest, Ch 21 |
+| Boost, Catch2, GoogleTest | libraries the book uses | Ch 10, 12, 20, 21, Boss 8 |
+
+**With VS Code (recommended):** install the *Dev Containers* extension, open this folder, then run
+**Dev Containers: Reopen in Container** from the command palette. The first build takes a few minutes. After
+that, VS Code's terminal is Ubuntu: `./quest run 1-1` compiles with GCC, `gdb .build/01-01_absolute_value`
+debugs, and **Run and Debug → "GDB: debug active file"** debugs the file you have open. The world map works
+in there too (`./quest world`; VS Code forwards the port), but open PDFs from your Mac.
+
+**From a plain terminal:**
+
+```bash
+docker build -t cppcc-linux .devcontainer
+```
+
+```bash
+docker run --rm -it --cap-add=SYS_PTRACE --security-opt seccomp=unconfined -v "$PWD":/work -w /work cppcc-linux
+```
+
+Inside the container, `./quest` works as usual and builds with `g++`. Exit with `Ctrl-D`.
+
+Try these once you've reached the matching chapter:
+
+```bash
+valgrind --leak-check=full .build/<program>      # memory errors and leaks
+strace -f -e trace=openat,read,write .build/<program>   # what it asks the kernel to do
+./quest run 19-3 --tsan                           # ThreadSanitizer with GCC
+```
+
+A program you build in the container is a Linux program and won't run on the Mac (and the other way round).
+`./quest run` and `./quest done` always rebuild first, so this only matters when you start a binary by hand.
+
+---
+
 ## 🛠️ Setup notes
 
 - **Compiler:** Apple clang via the Xcode command-line tools (`xcode-select --install` if missing).
-- **Boost** (used in chapters 12–13, 15–16, 20–21 and Boss 8): `brew install boost`.
-  Homebrew's headers are picked up automatically.
+- **Boost** (used in chapters 12–13, 15–16, 20–21 and Boss 8): already in the Linux container. On the Mac,
+  run `brew install boost`; Homebrew's headers are picked up automatically.
 - **Testing frameworks** (Chapter 10): the exercises work with the book's hand-rolled `assert_that` /
   `run_test` approach. To try Catch2 or GoogleTest: `brew install catch2 googletest`, then link with
   `// quest-flags: -lCatch2Main -lCatch2` or `// quest-flags: -lgtest -lgtest_main`.

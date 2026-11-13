@@ -820,14 +820,26 @@ def celebrate(book, save, a, b, quiet):
 PREFIXES = [Path("/opt/homebrew"), Path("/usr/local")]
 
 
+LINUX = sys.platform.startswith("linux")
+
+
 def boost_available():
-    return any((p / "include" / "boost").is_dir() for p in PREFIXES)
+    return any((p / "include" / "boost").is_dir() for p in PREFIXES + [Path("/usr")])
+
+
+def boost_hint():
+    return "sudo apt install libboost-dev libboost-program-options-dev" if LINUX else "brew install boost"
+
+
+def opener():
+    return "open" if sys.platform == "darwin" else ("xdg-open" if shutil.which("xdg-open") else None)
 
 
 def build(sources, out_name, sanitize=None):
     cxx = os.environ.get("CXX", "clang++")
     if not shutil.which(cxx):
-        die(f"Compiler '{cxx}' not found. Install the Xcode command-line tools: xcode-select --install")
+        die(f"Compiler '{cxx}' not found. " + ("Install it: sudo apt install build-essential" if LINUX
+                                                 else "Install the Xcode command-line tools: xcode-select --install"))
     BUILD.mkdir(exist_ok=True)
     out = BUILD / out_name
     cmd = [cxx, "-std=c++20", "-Wall", "-Wextra", "-g"]
@@ -857,7 +869,7 @@ def build(sources, out_name, sanitize=None):
     if text:
         print(textwrap.indent(text, "  "))
     if p.returncode != 0 and "boost/" in text and not boost_available():
-        print(YEL("  Boost isn't installed. Run: brew install boost"))
+        print(YEL(f"  Boost isn't installed. Run: {boost_hint()}"))
     return p.returncode == 0, warnings, out
 
 
@@ -1235,7 +1247,7 @@ def cmd_boss(book, args):
     if untouched(book, d / "main.cpp") and len(srcs) == 1:
         die("main.cpp is still empty. Read the README, plan, and start coding!")
     if b["build"] == "boost" and not boost_available():
-        die("This boss needs Boost: brew install boost")
+        die(f"This boss needs Boost: {boost_hint()}")
     san = {"sanitize": "asan", "tsan": "tsan"}.get(b["build"])
     print(f"\n  ⚔️  Attack 1: build{(' with ' + san.upper()) if san else ''}")
     ok, warns, out = build(srcs, b["dir"] + ("-" + san if san else ""), san)
@@ -1650,8 +1662,10 @@ def cmd_pdf(book, args):
     p = book.side_pdf(book.side[key]) if key in book.side else book.pdf()
     if not p:
         die("No PDF found in this folder.")
-    opener = "open" if sys.platform == "darwin" else "xdg-open"
-    subprocess.run([opener, str(p)])
+    how = opener()
+    if not how:
+        die("Can't open PDFs from here (no desktop in the Linux container). Run ./quest pdf in a Mac terminal.")
+    subprocess.run([how, str(p)])
     if args and args[0] in book.reading:
         q = book.reading[args[0]][1]
         print(f"  Jump to page {q['page']} (⌥⌘G in Preview).")
@@ -1882,7 +1896,9 @@ def cmd_world(book, args):
                 p = book.side_pdf(book.side[key]) if key in book.side else book.pdf()
                 if not p:
                     return self.send(404, {"error": "PDF not found"})
-                subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(p)])
+                if not opener():
+                    return self.send(400, {"error": "no PDF viewer here; run ./quest world on your Mac to open books"})
+                subprocess.Popen([opener(), str(p)])
                 return self.send(200, {"ok": True})
             if path == "/api/tick":
                 b = book.bosses.get(body.get("n"))
